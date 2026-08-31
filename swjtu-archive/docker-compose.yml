@@ -1,0 +1,18 @@
+services:
+  swjtu-archive:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        swjtu-cli: ../../SWJTU-CLI
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SWJTU_ARCHIVE_DATA: /data
+      SWJTU_ARCHIVE_ADDR: :8080
+      SWJTU_ARCHIVE_INTERVAL: 30m
+      SWJTU_ARCHIVE_BACKFILL: 1y
+      SWJTU_ARCHIVE_MAX_PAGES: "100"
+    volumes:
+      - /data/swjtu-archive:/data
