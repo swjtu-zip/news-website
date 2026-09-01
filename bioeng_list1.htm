@@ -1,0 +1,417 @@
+﻿<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<HTML><HEAD><TITLE>学院动态-生命科学与工程学院</TITLE><meta name="pageType" content="2">
+<meta name="pageTitle" content="学院动态">
+<META Name="keywords" Content="生命科学与工程学院" />
+
+
+
+
+
+<META content="text/html; charset=UTF-8" http-equiv="Content-Type">
+<LINK rel="stylesheet" type="text/css" href="dfiles/18304/css/style.css">
+
+<META name="description" content="西南交通大学肇建于1896年，由时任直隶总督王文韶上奏设立，是中国近代建校最早的高等学府之一，也是中国近代交通矿冶、土木工程教育的发源地。">
+
+<!--Announced by Visual SiteBuilder 9-->
+<script language="javascript" src="_sitegray/_sitegray.js"></script>
+<!-- CustomerNO:77656262657232307476475d51535742000300034452 -->
+<link rel="stylesheet" type="text/css" href="tplby.vsb.css" />
+<script type="text/javascript" src="/system/resource/js/counter.js"></script>
+<script type="text/javascript">_jsq_(1031,'/tplby.jsp',-1,1440185115)</script>
+</HEAD>
+<BODY><!--Header-->
+<DIV class="header">
+<DIV class="topbox">
+<DIV class="topcon">
+<DIV class="search"><!-- 3.1.3版本 -->
+
+
+
+<script language="javascript" src="/system/resource/js/base64.js"></script><script language="javascript" src="/system/resource/js/jquery/jquery-latest.min.js"></script><script language="javascript" src="/system/resource/vue/vue.js"></script><script language="javascript" src="/system/resource/vue/bluebird.min.js"></script><script language="javascript" src="/system/resource/vue/axios.js"></script><script language="javascript" src="/system/resource/vue/polyfill.js"></script><script language="javascript" src="/system/resource/vue/token.js"></script><LINK href="/system/resource/vue/static/element/index.css" type="text/css" rel="stylesheet"><script language="javascript" src="/system/resource/vue/static/element/index.js"></script><script language="javascript" src="/system/resource/vue/static/public.js"></script><script language="javascript" src="/system/resource/openapp/search/js/containsHtmlTags.js"></script><script language="javascript" src="/system/resource/openapp/search/layui/layui.js"></script><style>
+    #appu0 .qwss{
+        height: 31px;
+        font-size: 12px;
+        min-width: 190px;
+        max-width: 600px;
+        width: 60%;
+        margin-top: -15px;
+        outline: none;
+        padding-left: 10px;
+        border-radius: 2px;
+        border: 1px solid #e4e7ed;}
+    #appu0 .tj{
+        padding-left: 6px;
+        letter-spacing: 5px;
+        color: white;
+        min-width: 53px;
+        max-width: 150px;
+        height: 32px;
+        border: 0;
+        border-radius: 2px;
+        background-color: #1890FF;
+        position: relative;
+        top: 1px;
+        width: 20%;
+        margin-top: -15px;}
+</style>
+<div id="divu0"></div>
+<script type="text/html" id="htmlu0">
+    <div id="appu0">
+        <div v-if="!isError">
+        
+        <input  class="search_text"  autocomplete=off v-model=query.keyWord @keyup.enter="onSubmit">
+ <input type="submit" class="search_but" value=""  v-on:click="onSubmit()" >
+        
+         
+        </div>
+        <div v-if="isError" style="color: #b30216; font-size:18px;text-align: center;padding:20px;">
+            应用维护中！
+        </div>
+    </div>
+</script>
+<script>
+    $("#divu0").html($("#htmlu0").text());
+</script>
+<script>
+    var appOwner = "1440185115";
+    var token = gettoken(10);
+    var urlPrefix = "/aop_component/";
+
+    jQuery.support.cors = true;
+    $.ajaxSetup({
+        beforeSend: function (request, settings) {
+            request.setRequestHeader("Authorization", token);
+            request.setRequestHeader("owner", appOwner);
+        }
+    });
+
+    new Vue({
+        el: "#appu0",
+        data: function () {
+            return {
+                query: {
+                    keyWord: "",//搜索关键词
+                    owner: appOwner,
+                    token: token,
+                    urlPrefix: urlPrefix,
+                    lang:"i18n_zh_CN"
+                },
+                isError: false
+            }
+        },
+        mounted: function () {
+            var _this = this;
+            // _this.init();
+        },
+        methods: {
+            init: function(){
+                $.ajax({
+                    url: "/aop_component//webber/search/test",
+                    type: "get",
+                    success: function (response) {
+                        if (response.code == "0000") {
+                        } else if (response.code == "220") {
+                            _this.isError = true;
+                            console.log(response);
+                        } else if (!response.code) {
+                            _this.isError = true;
+                            console.log(response);
+                        }
+                    },
+                    error: function (response) {
+                        _this.isError = true;
+                    }
+                });
+            },
+            onSubmit: function (e) {
+                var url = "/aop_views/search/modules/resultpc/soso.html";
+                if ("10" == "1" || "10" == "2") {
+                    url = "" + url;
+                }
+                var _this = this;
+                var query = _this.query;
+                if (url.indexOf("?") > -1) {
+                    url = url.split("?")[0];
+                }
+                if (query.keyWord) {
+                    var query = new Base64().encode(JSON.stringify(query));
+                    window.open(url + "?query=" + query);
+                } else {
+                    alert("请填写搜索内容")
+                }
+            },
+        }
+    })
+</script>
+
+<script>
+   var appElementu0 = document.querySelector("#appu0");
+   if (appElementu0 && appElementu0.__vue__) {
+
+   } else {
+      $("#divu0").html($("#htmlu0").text());
+      var appOwner = "1440185115";   
+      var urlPrefix = "/aop_component/";
+      var ifLogin="";
+      var token = ifLogin=='true'?gettoken(10, true).trim():'tourist';
+      if (containsHtmlTags(token) || !token) { 
+         token = 'tourist';
+      }
+      jQuery.support.cors = true;
+      $.ajaxSetup({
+        beforeSend: function (request, settings) {
+            request.setRequestHeader("Authorization", token);
+            request.setRequestHeader("owner", appOwner);
+        }
+      });
+      var queryInfou0 = {
+        query: {
+            keyWord: "",//搜索关键词
+            owner: appOwner,
+            token: token,
+            urlPrefix: urlPrefix,
+            lang:"i18n_zh_CN"
+        },
+        isError: false
+      };
+      function keyUpFunu0(e){
+        var theEvent = e || window.event;
+        var keyCode = theEvent.keyCode || theEvent.which || theEvent.charCode;
+        if(keyCode == 13){
+          onSubmitu0();
+        }
+      };
+
+      function onSubmitu0(e) {
+        queryInfou0.query.keyWord= $("#appu0  .qwss").val();
+        
+        var url = "/aop_views/search/modules/resultpc/soso.html";      
+        if ("10" == "1" || "10" == "2") {
+           url = "" + url;
+        }
+        var query = queryInfou0.query;
+        if (url.indexOf("?") > -1) {
+            url = url.split("?")[0];
+        }
+        if (query.keyWord) {
+            var query = new Base64().encode(JSON.stringify(query));
+            window.open(url + "?query=" + query);
+        } else {
+            alert("请填写搜索内容")
+        }
+      };
+   }
+</script></DIV><script language="javascript" src="/system/resource/js/dynclicks.js"></script><script language="javascript" src="/system/resource/js/openlink.js"></script>    <a href="http://www.swjtu.edu.cn/" onfocus="undefined" target="_blank" title="学校主页" onclick="_addDynClicks(&#34;wburl&#34;, 1440185115, 40731)">学校主页</a>
+ </DIV></DIV></DIV>
+<DIV class="header_ban">
+<DIV class="logo">
+<a href="dfiles/18304/images/logo.png">生命科学与工程学院</a></DIV></DIV>
+<DIV class="nav">   <ul>
+
+   <li> <a href="index.htm" title="首页">首页</a>
+    </li>
+
+
+   <li> <a href="xygk/xyjj.htm" title="学院概况">学院概况</a>
+    </li>
+
+
+   <li class="cur"> <a href="xydt.htm" title="学院动态">学院动态</a>
+    </li>
+
+
+   <li> <a href="xkdt/xsdt.htm" title="学科动态">学科动态</a>
+    </li>
+
+
+   <li> <a href="djzc.htm" title="党建之窗">党建之窗</a>
+    </li>
+
+
+   <li> <a href="rcpy.htm" title="人才培养">人才培养</a>
+    </li>
+
+
+   <li> <a href="xsgz.htm" title="学生工作">学生工作</a>
+    </li>
+
+
+   <li> <a href="sypt.htm" target="_blank" title="实验平台">实验平台</a>
+    </li>
+
+
+   <li> <a href="jgzj.htm" title="教工之家">教工之家</a>
+    </li>
+
+
+   <li> <a href="xygz.htm" title="校友工作">校友工作</a>
+    </li>
+
+
+   <li> <a href="wjxz.htm" title="文件下载">文件下载</a>
+    </li>
+
+
+   <li> <a href="https://bioeng.swjtu.edu.cn/rcpy/zwhzbx.htm" title="中外合作办学">中外合作办学</a>
+    </li>
+</ul></DIV>
+<DIV></DIV>
+<!--Header-->
+<!--banner-->
+<div class="banner">
+    <div class="banner_con"></div>
+</div>
+<!--banner End-->
+<div class="wrap">
+<!--PageLeft-->
+    
+        
+
+<DIV class="main_left">
+<DIV class="menu"><script type="text/javascript">
+    $(function () {
+        $(".submenu").click(function () {
+            $(this).toggleClass("submenu_cur").siblings(".submenu").removeClass("submenu_cur")
+            $(this).next(".navcon").slideToggle(500).siblings(".navcon").slideUp(500);
+        })
+    })
+</script>
+
+
+
+
+
+       		<h3>学院动态</h3>
+<div class="submenu">
+    <a href="xydt/xytz.htm">学院通知</a></div>
+
+     
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</DIV></DIV><!--PageLeft-->
+<DIV class="main_right">
+<DIV class="current">
+<H3>
+学院动态</H3>
+
+        
+            
+            <a href="index.htm" onfocus="undefined">首页</a>
+            
+            &gt;&gt;
+            <a href="xydt.htm" onfocus="undefined">学院动态</a>
+            </DIV>
+
+        <div class="content">
+
+
+<script language="javascript" src="/system/resource/js/centerCutImg.js"></script><script language="javascript" src="/system/resource/js/ajax.js"></script>    
+
+<dl><dt><a href="info/1031/20936.htm"><img src="dfiles/18304/images/news14.jpg"></a></dt><dd><h4><a href="info/1031/20936.htm">生命科学与工程学院与珠海润都制药举行产学研合作交流研讨会</a></h4><em>2026-07-07</em><p>2026年7月6日上午，生命学院—珠海润都制药股份有限公司产学研合作交流研讨会在犀浦校区X2314会议室举行。珠海润都制药副总经理蔡强博士、...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20916.htm"><img src="/__local/D/C3/E8/5D5D785BDE17EC284DB57B20593_7EC423A0_64A71.jpg"></a></dt><dd><h4><a href="info/1031/20916.htm">我院扎实开展2026年本科招生宣传工作</a></h4><em>2026-07-03</em><p>为全面做好学校2026年本科招生宣传工作，拓宽生源渠道、提升学校和学院办学影响力，让各地考生与家长全面了解我校办学底蕴、专业特色与招...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20836.htm"><img src="dfiles/18304/images/news14.jpg"></a></dt><dd><h4><a href="info/1031/20836.htm">生命科学与工程学院以“红色名片”点亮宿舍园区 深化“一站式”学生社区党建引领</a></h4><em>2026-06-26</em><p>为深入推进“一站式”学生社区综合管理模式建设，推动党建工作下沉学生生活园区，充分发挥学生党员先锋模范作用，筑牢社区育人红色阵地，...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20746.htm"><img src="dfiles/18304/images/news14.jpg"></a></dt><dd><h4><a href="info/1031/20746.htm">西南交通大学生命科学与工程学院第十三次学生代表大会、第十三次研究生代表大会顺利召开</a></h4><em>2026-06-15</em><p>6月13日上午，西南交通大学生命科学与工程学院第十三次学生代表大会、第十三次研究生代表大会于图书馆二号报告厅隆重召开。学院党委副书记...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20706.htm"><img src="/__local/B/71/4B/30922F8FAD26E6C149AB62ECB96_F33D9442_91CA9.jpg"></a></dt><dd><h4><a href="info/1031/20706.htm">生命科学与工程学院举行2026届学生毕业典礼暨学位授予仪式</a></h4><em>2026-06-03</em><p>骊歌轻响，青春启航。 5月30日下午，西南交通大学生命科学与工程学院2026届学生毕业典礼暨学位授予仪式在犀浦校区3号教学楼下沉广场举行。...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20506.htm"><img src="/__local/5/27/D1/168D1CA1F7A48916E6F9BE1F888_832CBC5A_1F3CB.jpg"></a></dt><dd><h4><a href="info/1031/20506.htm">百卅交大·生命同行——生命学院举行庆祝母校130周年校庆系列活动</a></h4><em>2026-05-18</em><p>5月15日，西南交通大学迎来了建校130周年华诞。值此盛典，生命科学与工程学院精心策划并举办了系列庆祝活动。从五湖四海归来的生命校友与...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20476.htm"><img src="/__local/9/DB/F8/F41FFB210BF1AFFFCC6A44732D9_CF3E720A_2AF78.jpg"></a></dt><dd><h4><a href="info/1031/20476.htm">百卅交大·生生不息——生命学院师生校友携手共庆西南交通大学130周年华诞</a></h4><em>2026-05-15</em><p>竢实耀百卅，扬华铸未来；生命正当时，奋进谱新篇。5月15日，西南交通大学迎来建校130周年华诞，生命科学与工程学院校友相约百卅交大，重...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20266.htm"><img src="dfiles/18304/images/news14.jpg"></a></dt><dd><h4><a href="info/1031/20266.htm">关于征集弘扬践行教育家精神系列活动作品的通知</a></h4><em>2026-05-12</em><p>全院师生、广大校友：为深入学习贯彻习近平总书记给四所交通大学全体师生的重要回信精神，扎实开展教育家精神铸魂强师行动，讲好新时代生...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20236.htm"><img src="/__local/5/BB/15/2ED8A79C64F8B7ED38C4D2E902C_04ED67EB_53E45.jpeg"></a></dt><dd><h4><a href="info/1031/20236.htm">学校举办第七届“交大杯”实验室安全知识与技能大赛</a></h4><em>2026-05-10</em><p>为深入贯彻习近平总书记关于安全生产的重要指示精神，牢固树立总体国家安全观，坚持“安全第一、预防为主、综合治理”方针，夯实校园实验...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20076.htm"><img src="/__local/5/99/11/AA6895AF214D90BB2E2FD9AD5B6_92855F67_1EE0C.jpeg"></a></dt><dd><h4><a href="info/1031/20076.htm">生命学院召开2026年校友工作会议</a></h4><em>2026-04-22</em><p>4月16日上午，生命科学与工程学院2026年校友工作会议在犀浦校区2314会议室召开。学院院长周先礼、党委书记黄春蓉、党委副书记、纪委书记高...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/20066.htm"><img src="dfiles/18304/images/news14.jpg"></a></dt><dd><h4><a href="info/1031/20066.htm">生命学院举办“院领导面对面”2026年第一期活动</a></h4><em>2026-04-20</em><p>2026年4月20日下午14：00，生命学院院领导面对面2026年第一期活动在九里校区3609会议室举行，本期活动聚焦青年教师成长，参加座谈会的有学...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/19976.htm" style="font-weight:bold;"><img src="/__local/A/FD/3A/52220F294642D47F58A3FD2714B_04281F69_44E92.jpg"></a></dt><dd><h4><a href="info/1031/19976.htm">生命科学与工程学院党委专题学习宣传贯彻习近平总书记重要回信精神</a></h4><em>2026-04-09</em><p>4月7日，中共中央总书记、国家主席、中央军委主席习近平给上海交通大学、西安交通大学、西南交通大学、北京交通大学四所交通大学全体师生...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/19826.htm"><img src="/__local/5/61/99/B44AA7613392584E30F5246771F_FF14DDEA_A7E1D.jpg"></a></dt><dd><h4><a href="info/1031/19826.htm">生命绽芳华 同心庆百卅——生命学院举办校庆主题教师健步行活动</a></h4><em>2026-03-29</em><p>为喜迎母校130周年华诞，丰富教职工文化生活，3月26日，生命学院工会在郫都区青杠树景区举办生命绽芳华，同心庆百卅教师健步行活动。学院...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/19786.htm"><img src="dfiles/18304/images/news14.jpg"></a></dt><dd><h4><a href="info/1031/19786.htm">生命学院工会2026年第一次全体会议顺利召开</a></h4><em>2026-03-26</em><p>3月24日上午，学院工会在X2314会议室召开2026年第一次全体会议。学院工会委员及各工会小组组长参加会议，会议由学院工会主席高鹏主持。会...</p></dd></dl>
+
+
+<dl><dt><a href="info/1031/19716.htm"><img src="/__local/7/4A/C9/699C705264020E41EB2758F9266_F025268F_732A1.jpg"></a></dt><dd><h4><a href="info/1031/19716.htm">生命科学与工程学院赴成都青山利康股份有限公司开展校企合作交流活动</a></h4><em>2026-03-23</em><p>为深化校企合作，促进供需对接，助力毕业生高质量就业，3月20日上午，生命科学与工程学院党委书记黄春蓉、副院长陈琳、实验中心主任刘新荣...</p></dd></dl>
+    <link rel="stylesheet" Content-type="text/css" href="/system/resource/css/pagedown/sys.css"><div class="pb_sys_common pb_sys_normal pb_sys_style1" style="margin-top:10px;text-align:center;"><span class="p_pages"><span class="p_first_d p_fun_d">首页</span><span class="p_prev_d p_fun_d">上页</span><span class="p_no_d">1</span><span class="p_no"><a href="xydt/46.htm">2</a></span><span class="p_no"><a href="xydt/45.htm">3</a></span><span class="p_no"><a href="xydt/44.htm">4</a></span><span class="p_no"><a href="xydt/43.htm">5</a></span><span class="p_dot">...</span><span class="p_no"><a href="xydt/1.htm">47</a></span><span class="p_next p_fun"><a href="xydt/46.htm">下页</a></span><span class="p_last p_fun"><a href="xydt/1.htm">尾页</a></span></span></div>
+<script>_showDynClickBatch(['dynclicks_u7_20936','dynclicks_u7_20916','dynclicks_u7_20836','dynclicks_u7_20746','dynclicks_u7_20706','dynclicks_u7_20506','dynclicks_u7_20476','dynclicks_u7_20266','dynclicks_u7_20236','dynclicks_u7_20076','dynclicks_u7_20066','dynclicks_u7_19976','dynclicks_u7_19826','dynclicks_u7_19786','dynclicks_u7_19716'],[20936,20916,20836,20746,20706,20506,20476,20266,20236,20076,20066,19976,19826,19786,19716],"wbnews", 1440185115)</script></div>
+        
+
+            <div class="clear10">  </div>  
+
+    </div>
+    <div class="clear"></div>
+</div>
+    <div class="clear"></div>
+<!--footer--><!--footer-->
+<DIV class="footer min20">
+<DIV class="footer_con">
+<DIV class="fotcopy"><!-- 版权内容请在本组件"内容配置-版权"处填写 -->
+<p>地址：中国四川省成都市二环路北一段111号&nbsp;&nbsp; 邮编：611756 &nbsp; 联系电话：028-66368122 &nbsp; E-mail：smxy@swjtu.edu.cn</p><p>ADD：No. 111, North 1st Section, 2nd Ring Road Chengdu, Sichuan, China,611756. &nbsp; TEL: 028-66368122</p></DIV>
+<DIV class="code">      
+
+           
+                        <img src="dfiles/18304/images/code.png" width="60" height="60">  <P>二维码</P>
+
+
+</DIV>
+<DIV class="clear"></DIV></DIV></DIV>
+
+
+<script type="text/javascript" src="dfiles/18304/js/bdtxk.min.js"></script>
+<script type="text/javascript" src="dfiles/18304/js/homeban.js"></script>
+<script type="text/javascript" src="dfiles/18304/js/bdtxk.touchslider.js"></script>
+
+</BODY></HTML>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

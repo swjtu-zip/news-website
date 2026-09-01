@@ -42,10 +42,24 @@ var (
 
 func main() {
 	verify := flag.Bool("verify", false, "print date extraction context per site")
+	site := flag.String("site", "", "only check feeds of this site id")
 	flag.Parse()
 	_ = os.MkdirAll("/tmp/audit-raw", 0o755)
 	client := sdk.New(sdk.Options{})
 	feeds := sdk.Feeds()
+	if *site != "" {
+		var filtered []sdk.Feed
+		for _, feed := range feeds {
+			if feed.SiteID == *site {
+				filtered = append(filtered, feed)
+			}
+		}
+		if len(filtered) == 0 {
+			fmt.Fprintf(os.Stderr, "no feeds for site %q\n", *site)
+			os.Exit(2)
+		}
+		feeds = filtered
+	}
 	results := make([][]result, len(feeds))
 	var wg sync.WaitGroup
 	gate := make(chan struct{}, 4)

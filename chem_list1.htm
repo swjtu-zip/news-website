@@ -1,0 +1,488 @@
+﻿<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="renderer" content="webkit" />
+    <meta name="force-rendering" content="webkit" />
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge,chrome=1" />
+    <title>学院新闻-西南交通大学化学学院</title><meta name="pageType" content="2">
+<meta name="pageTitle" content="学院新闻">
+<META Name="keywords" Content="西南交通大学化学学院" />
+
+    <meta name="description" content="" />
+    
+    <meta name="viewport" content="width=device-width, maximum-scale=1, initial-scale=1, user-scalable=no, viewport-fit=cover">
+    <link rel="stylesheet" type="text/css" href="../dfiles/4723/static/css/swiper.min.css" />
+    <link rel="stylesheet" type="text/css" href="../dfiles/4723/static/css/tailwind.css" />
+    <link rel="stylesheet" type="text/css" href="../dfiles/4723/static/css/common.css" />
+    <link rel="stylesheet" type="text/css" href="../dfiles/4723/static/css/style.css" />
+    <link rel="stylesheet" type="text/css" href="../dfiles/4723/static/css/responsive.css" />
+<!--Announced by Visual SiteBuilder 9-->
+<script language="javascript" src="../_sitegray/_sitegray.js"></script>
+<!-- CustomerNO:77656262657232307476475d51535742000300034452 -->
+<link rel="stylesheet" type="text/css" href="../article_list.vsb.css" />
+<script type="text/javascript" src="/system/resource/js/counter.js"></script>
+<script type="text/javascript">_jsq_(1086,'/article_list.jsp',-1,1897809613)</script>
+</head>
+
+<body>
+
+     <header class="header">
+        <div class="header-top flex items-center justify-between container">
+            <a class="logo" href="../">
+               <img src="../75841f37067c5aedb35ffeddd279f436.png" alt="" style="width: 59%;">
+            </a>
+            <div class="form">
+                <div class="language flex items-center justify-end">
+                    <a href="javascript:void(0);">联系我们</a>
+                    <span></span>
+                    <a href="javascript:void(0);">English</a>
+                </div>
+                <!-- 3.1.3版本 -->
+
+
+
+<script language="javascript" src="/system/resource/js/base64.js"></script><script language="javascript" src="/system/resource/js/jquery/jquery-latest.min.js"></script><script language="javascript" src="/system/resource/vue/vue.js"></script><script language="javascript" src="/system/resource/vue/bluebird.min.js"></script><script language="javascript" src="/system/resource/vue/axios.js"></script><script language="javascript" src="/system/resource/vue/polyfill.js"></script><script language="javascript" src="/system/resource/vue/token.js"></script><LINK href="/system/resource/vue/static/element/index.css" type="text/css" rel="stylesheet"><script language="javascript" src="/system/resource/vue/static/element/index.js"></script><script language="javascript" src="/system/resource/vue/static/public.js"></script><script language="javascript" src="/system/resource/openapp/search/js/containsHtmlTags.js"></script><script language="javascript" src="/system/resource/openapp/search/layui/layui.js"></script><style>
+    #appu0 .qwss{}
+    #appu0 .tj{}
+</style>
+<div id="divu0"></div>
+<script type="text/html" id="htmlu0">
+    <div id="appu0">
+        <div v-if="!isError" class="search-block">
+            <input type="text" class="qwss search-input" placeholder="全文搜索" autocomplete=off v-model=query.keyWord @keyup.enter="onSubmit">
+            <input class="tj search-button" name="submit_button" type="button" value="提交" v-on:click="onSubmit()"/>
+        </div>
+        <div v-if="isError" style="color: #b30216; font-size:18px;text-align: center;padding:20px;">
+            应用维护中！
+        </div>
+    </div>
+</script>
+<script>
+    $("#divu0").html($("#htmlu0").text());
+</script>
+<script>
+    var appOwner = "1897809613";
+    var token = gettoken(10);
+    var urlPrefix = "/aop_component/";
+
+    jQuery.support.cors = true;
+    $.ajaxSetup({
+        beforeSend: function (request, settings) {
+            request.setRequestHeader("Authorization", token);
+            request.setRequestHeader("owner", appOwner);
+        }
+    });
+
+    new Vue({
+        el: "#appu0",
+        data: function () {
+            return {
+                query: {
+                    keyWord: "",//搜索关键词
+                    owner: appOwner,
+                    token: token,
+                    urlPrefix: urlPrefix,
+                    lang:"i18n_zh_CN"
+                },
+                isError: false
+            }
+        },
+        mounted: function () {
+            var _this = this;
+            // _this.init();
+        },
+        methods: {
+            init: function(){
+                $.ajax({
+                    url: "/aop_component//webber/search/test",
+                    type: "get",
+                    success: function (response) {
+                        if (response.code == "0000") {
+                        } else if (response.code == "220") {
+                            _this.isError = true;
+                            console.log(response);
+                        } else if (!response.code) {
+                            _this.isError = true;
+                            console.log(response);
+                        }
+                    },
+                    error: function (response) {
+                        _this.isError = true;
+                    }
+                });
+            },
+            onSubmit: function (e) {
+                var url = "/aop_views/search/modules/resultpc/soso.html";
+                if ("10" == "1" || "10" == "2") {
+                    url = "" + url;
+                }
+                var _this = this;
+                var query = _this.query;
+                if (url.indexOf("?") > -1) {
+                    url = url.split("?")[0];
+                }
+                if (query.keyWord) {
+                    var query = new Base64().encode(JSON.stringify(query));
+                    window.open(url + "?query=" + query);
+                } else {
+                    alert("请填写搜索内容")
+                }
+            },
+        }
+    })
+</script>
+
+<script>
+   var appElementu0 = document.querySelector("#appu0");
+   if (appElementu0 && appElementu0.__vue__) {
+
+   } else {
+      $("#divu0").html($("#htmlu0").text());
+      var appOwner = "1897809613";   
+      var urlPrefix = "/aop_component/";
+      var ifLogin="";
+      var token = ifLogin=='true'?gettoken(10, true).trim():'tourist';
+      if (containsHtmlTags(token) || !token) { 
+         token = 'tourist';
+      }
+      jQuery.support.cors = true;
+      $.ajaxSetup({
+        beforeSend: function (request, settings) {
+            request.setRequestHeader("Authorization", token);
+            request.setRequestHeader("owner", appOwner);
+        }
+      });
+      var queryInfou0 = {
+        query: {
+            keyWord: "",//搜索关键词
+            owner: appOwner,
+            token: token,
+            urlPrefix: urlPrefix,
+            lang:"i18n_zh_CN"
+        },
+        isError: false
+      };
+      function keyUpFunu0(e){
+        var theEvent = e || window.event;
+        var keyCode = theEvent.keyCode || theEvent.which || theEvent.charCode;
+        if(keyCode == 13){
+          onSubmitu0();
+        }
+      };
+
+      function onSubmitu0(e) {
+        queryInfou0.query.keyWord= $("#appu0  .qwss").val();
+        
+        var url = "/aop_views/search/modules/resultpc/soso.html";      
+        if ("10" == "1" || "10" == "2") {
+           url = "" + url;
+        }
+        var query = queryInfou0.query;
+        if (url.indexOf("?") > -1) {
+            url = url.split("?")[0];
+        }
+        if (query.keyWord) {
+            var query = new Base64().encode(JSON.stringify(query));
+            window.open(url + "?query=" + query);
+        } else {
+            alert("请填写搜索内容")
+        }
+      };
+   }
+</script>
+            </div>
+            <div class="gh">
+                <a href="javascript:void(0);"></a>
+            </div>
+        </div>
+        <nav class="nav">
+            <div class="container">
+                <div class="form">
+                    <div class="language flex items-center justify-end">
+                        <a href="javascript:void(0);">联系我们</a>
+                        <span></span>
+                        <a href="javascript:void(0);">English</a>
+                    </div>
+                    <form action="">
+                        <div class="search-block">
+                            <input class="search-input" type="text" placeholder="请输入搜索关键字">
+                            <input class="search-button" type="submit">
+                        </div>
+                    </form>
+                </div>
+                
+
+<ul class="flex">
+                    <li class="active">
+                        <a href="../index.htm">首页</a>
+                    </li>
+                    <li class="">
+                        <a href="../xygk.htm">学院概况</a>
+                    </li>
+                    <li class="">
+                        <a href="../rcpy.htm">人才培养</a>
+                    </li>
+                    <li class="">
+                        <a href="../kxyj.htm">科学研究</a>
+                    </li>
+                    <li class="">
+                        <a href="../dqgz.htm">党群工作</a>
+                    </li>
+                    <li class="">
+                        <a href="../xsgz.htm">学生工作</a>
+                    </li>
+                    <li class="">
+                        <a href="../aqgz.htm">安全工作</a>
+                    </li>
+                    <li class="">
+                        <a href="../rczp.htm">人才招聘</a>
+                    </li>
+                    <li class="">
+                        <a href="../xygz.htm">校友工作</a>
+                    </li>
+                    <li class="">
+                        <a href="../hzjl.htm">合作交流</a>
+                    </li>
+                    <li class="">
+                        <a href="../zsjy.htm">招生就业</a>
+                    </li>
+                    
+                </ul>
+
+
+            </div>
+        </nav>
+    </header>
+    <div class="page-banner" style="background-image: url(../dfiles/4723/static/images/small.jpg);"></div>
+    <main class="main">
+        <div class="container flex flex-wrap">
+            <div class="news-navbar">
+                <h3>
+首页</h3>
+                
+<ul>
+                    <li>
+                        <a href="xyxw.htm">学院新闻</a>
+                    </li>
+                    <li>
+                        <a href="xytz.htm">学院通知</a>
+                    </li>
+                    <li>
+                        <a href="ttxw.htm">头条新闻</a>
+                    </li>
+                    <li>
+                        <a href="jwgg.htm">教务公告</a>
+                    </li>
+                    <li>
+                        <a href="kxyj.htm">科学研究</a>
+                    </li>
+                   
+                </ul>
+
+
+            </div>
+            <div class="news-list-wrap flex-1">
+                <div class="hd flex items-center justify-between">
+                    <h3>
+学院新闻</h3>
+                    <ul class="breadcrumb flex items-center">
+                <a href="../index.htm">首页</a>
+                >
+                <a href="xyxw.htm">学院新闻</a>
+</ul>
+                </div>
+                
+
+
+<script language="javascript" src="/system/resource/js/centerCutImg.js"></script><script language="javascript" src="/system/resource/js/dynclicks.js"></script><script language="javascript" src="/system/resource/js/ajax.js"></script><div class="bd">
+                    <ul class="list">
+                                            <li>
+                            <a href="../info/1086/14379.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">诺贝尔化学奖获得者Benjamin List教授受聘西南交通大学名誉教授</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-05-18</span>
+                                <span>阅读次数：<span id="dynclicks_u6_14379" name="dynclicks_u6_14379"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15629.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">我校化学学科ESI排名进入全球前2.84‰</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-21</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15629" name="dynclicks_u6_15629"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15619.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">化学学院组织开展2026年度研究生导师座谈会</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-16</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15619" name="dynclicks_u6_15619"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15599.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">《Nano Energy》发表化学学院博士生在钙钛矿电池界面调控方面最新成果</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-15</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15599" name="dynclicks_u6_15599"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15579.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">化学学院召开2026年春季学期第4次教职工大会</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-13</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15579" name="dynclicks_u6_15579"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15499.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">创源大讲堂|英国利兹大学戴胜教授到访化学学院开展学术交流</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-12</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15499" name="dynclicks_u6_15499"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15469.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">化学学院多措并举开展本科招生宣传工作</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-07</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15469" name="dynclicks_u6_15469"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15459.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">化学学院扎实开展期末考试巡考工作</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-07</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15459" name="dynclicks_u6_15459"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15449.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">喜报！化学学院徐晓玲主讲微党课获评学校“双带头人”教师党支部书记优秀微党课</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-07-06</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15449" name="dynclicks_u6_15449"></span></span>
+                            </p>
+                        </li>
+                        <li>
+                            <a href="../info/1086/15349.htm">
+                                <span>[学院新闻]</span>
+                                <p class="toe">创源大讲堂|中国科学院长春应用化学研究所唐涛研究员莅临化学学院作学术报告</p>
+                            </a>
+                            <p class="info flex items-center">
+                                <span>时间：2026-06-30</span>
+                                <span>阅读次数：<span id="dynclicks_u6_15349" name="dynclicks_u6_15349"></span></span>
+                            </p>
+                        </li>
+                        
+                    </ul>
+                </div>
+                <div class="pages">
+                   <link rel="stylesheet" Content-type="text/css" href="/system/resource/css/pagedown/sys.css"><div class="pb_sys_common pb_sys_full2 pb_sys_style7" style="margin-top:10px;text-align:center;"><span class="p_pages"><span class="p_first_d p_fun_d">首页</span><span class="p_prev_d p_fun_d">上页</span><span class="p_no_d">1</span><span class="p_no"><a href="xyxw/30.htm">2</a></span><span class="p_no"><a href="xyxw/29.htm">3</a></span><span class="p_no"><a href="xyxw/28.htm">4</a></span><span class="p_no"><a href="xyxw/27.htm">5</a></span><span class="p_dot">...</span><span class="p_no"><a href="xyxw/1.htm">31</a></span><span class="p_next p_fun"><a href="xyxw/30.htm">下页</a></span><span class="p_last p_fun"><a href="xyxw/1.htm">尾页</a></span></span></div>
+                </div>
+<script>_showDynClickBatch(['dynclicks_u6_14379','dynclicks_u6_15629','dynclicks_u6_15619','dynclicks_u6_15599','dynclicks_u6_15579','dynclicks_u6_15499','dynclicks_u6_15469','dynclicks_u6_15459','dynclicks_u6_15449','dynclicks_u6_15349'],[14379,15629,15619,15599,15579,15499,15469,15459,15449,15349],"wbnews", 1897809613)</script>
+            </div>
+        </div>
+    </main>
+    <footer class="footer"> 
+        <div class="container">
+            <div class="links">
+                <div class="title">
+                    <h4>LINK</h4>
+                </div>
+               <script language="javascript" src="/system/resource/js/openlink.js"></script><ul class="flex flex-wrap col-4">
+                    <li>
+                        <a href="https://www.swjtu.edu.cn/" onclick="_addDynClicks(&#34;wburl&#34;, 1897809613, 94638)">西南交通大学</a>
+                    </li>
+                    <li>
+                        <a href="https://news.swjtu.edu.cn/" onclick="_addDynClicks(&#34;wburl&#34;, 1897809613, 94639)">交大新闻网</a>
+                    </li>
+                    <li>
+                        <a href="http://xg.swjtu.edu.cn/web/Home/Index" onclick="_addDynClicks(&#34;wburl&#34;, 1897809613, 94640)">扬华素质网</a>
+                    </li>
+                    <li>
+                        <a href="http://www.moe.gov.cn/s78/A02/" onclick="_addDynClicks(&#34;wburl&#34;, 1897809613, 76685)">教育部政策法规司</a>
+                    </li>
+                    <li>
+                        <a href="http://m.moe.gov.cn/s78/A08/" onclick="_addDynClicks(&#34;wburl&#34;, 1897809613, 76686)">高等教育司</a>
+                    </li>
+                    <li>
+                        <a href="https://www.sc.gov.cn/" onclick="_addDynClicks(&#34;wburl&#34;, 1897809613, 76688)">四川省人民政府</a>
+                    </li>
+                    <li>
+                        <a href="http://edu.sc.gov.cn/" onclick="_addDynClicks(&#34;wburl&#34;, 1897809613, 76689)">四川省教育厅</a>
+                    </li>
+                    
+                </ul>
+
+
+
+            </div>
+            <div class="copyright flex flex-wrap justify-between">
+                 <!-- 版权内容请在本组件"内容配置-版权"处填写 -->
+<p>地址：四川省成都市郫都区犀安路999号西南交通大学  邮编：611756  传真：（028）66366999</p>
+                <p>Copyright &copy; 2023 成都西南交通大学 版权所有 All rights reserved</p>
+            </div>
+        </div>
+    </footer>
+    <!-- 遮罩层 -->
+    <div class="shade"></div>
+    <script src="../dfiles/4723/static/js/jquery.min.js" type="text/javascript" charset="utf-8"></script>
+    <script src="../dfiles/4723/static/js/swiper.min.js" type="text/javascript" charset="utf-8"></script>
+    <script src="../dfiles/4723/static/js/script.js" type="text/javascript" charset="utf-8"></script>
+    <script type="text/javascript">
+        $(function () {
+            var bannerSwiper = new Swiper("#bannerSwiper",{
+                autoplay:true,
+                loop:true,
+                pagination: {
+                    el: '.swiper-pagination',
+                    clickable :true,
+                }
+            })
+        })
+    </script>
+</body>
+
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
