@@ -24,20 +24,21 @@ import (
 )
 
 type result struct {
-	feed     sdk.Feed
-	art      *sdk.Article
-	url      string
-	listDate string
-	raw      []byte
-	err      error
-	problems []string
+	feed      sdk.Feed
+	art       *sdk.Article
+	url       string
+	listCount int
+	listDate  string
+	raw       []byte
+	err       error
+	problems  []string
 }
 
 var (
 	datePattern    = regexp.MustCompile(`^20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}`)
 	articleURLHint = regexp.MustCompile(`(info/\d+/\d+|/\d{4,})\.s?html?|newsDetail`)
 	navTitle       = regexp.MustCompile(`^(新闻动态|学院动态|中心要闻|党建要闻|通知公告|诚聘英才|查看更多|更多)$`)
-	badMetaValue   = regexp.MustCompile(`^(来源|信息来源|作者|编辑|责编|摄影|日期|时间|审核|点击量?|浏览|发布|发布日期|发布时间|供稿|撰稿)$`)
+	badMetaValue   = regexp.MustCompile(`^(来源|信息来源|作者|编辑|责编|摄影|日期|时间|审核|点击量?|浏览|阅读量|发布|发布日期|发布时间|供稿|撰稿)$`)
 )
 
 func main() {
@@ -85,7 +86,7 @@ func main() {
 					continue
 				}
 				picked++
-				res := result{feed: feed, url: item.URL, listDate: item.Date}
+				res := result{feed: feed, url: item.URL, listCount: len(items), listDate: item.Date}
 				art, raw, err := client.FetchArticleSnapshot(ctx, item.URL)
 				if err != nil {
 					res.err = fmt.Errorf("article: %v", err)
@@ -93,6 +94,14 @@ func main() {
 					res.art = art
 					res.raw = raw
 					res.problems = suspicious(art)
+					// A few legacy templates expose the publication date only on
+					// the list row. The collector persists that row date when the
+					// detail page has no date, so the audit must evaluate the same
+					// effective value instead of reporting a false missing-date
+					// failure.
+					if art.Date == "" && datePattern.MatchString(strings.TrimSpace(item.Date)) {
+						res.problems = removeProblem(res.problems, "date")
+					}
 					if len(res.problems) > 0 {
 						name := strings.NewReplacer("/", "_", ":", "_").Replace(feed.ID) + ".html"
 						_ = os.WriteFile(filepath.Join("/tmp/audit-raw", name), raw, 0o644)
@@ -135,8 +144,8 @@ func main() {
 			bad++
 			tag = "BAD " + strings.Join(res.problems, ",")
 		}
-		fmt.Printf("[%-14s] %-22s date=%q author=%q source=%q title=%q\n",
-			tag, res.feed.ID, res.art.Date, res.art.Author, res.art.Source, truncate(res.art.Title, 30))
+		fmt.Printf("[%-14s] %-22s list=%d list-date=%q date=%q author=%q source=%q title=%q\n",
+			tag, res.feed.ID, res.listCount, res.listDate, res.art.Date, res.art.Author, res.art.Source, truncate(res.art.Title, 30))
 	}
 	fmt.Printf("\n%d/%d samples look wrong\n", bad, len(flat))
 }
@@ -154,7 +163,7 @@ func printVerify(flat []result) {
 			continue
 		}
 		fmt.Printf("### %s (%s)\n", res.feed.ID, res.feed.SiteName)
-		fmt.Printf("title: %s\nlist : %q\nextr : %q\n", truncate(res.art.Title, 50), res.listDate, res.art.Date)
+		fmt.Printf("title: %s\ncount: %d\nlist : %q\nextr : %q\n", truncate(res.art.Title, 50), res.listCount, res.listDate, res.art.Date)
 		text := spaceRe.ReplaceAllString(tagRe.ReplaceAllString(string(res.raw), " "), " ")
 		if res.art.Date != "" {
 			found := false
@@ -213,6 +222,16 @@ func suspicious(art *sdk.Article) []string {
 		problems = append(problems, "meta")
 	}
 	return problems
+}
+
+func removeProblem(problems []string, unwanted string) []string {
+	filtered := problems[:0]
+	for _, problem := range problems {
+		if problem != unwanted {
+			filtered = append(filtered, problem)
+		}
+	}
+	return filtered
 }
 
 func truncate(s string, n int) string {
