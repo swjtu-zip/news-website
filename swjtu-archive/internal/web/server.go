@@ -711,14 +711,15 @@ func responseCachePolicy(r *http.Request, status int) (string, string) {
 	if status >= http.StatusBadRequest {
 		return errorCacheControl, errorCDNCacheControl
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/") {
-		return apiCacheControl, apiCDNCacheControl
-	}
 	if r.URL.Path == "/" ||
 		r.URL.Path == "/help/mcp" ||
 		strings.HasPrefix(r.URL.Path, "/article/") ||
-		strings.HasPrefix(r.URL.Path, "/assets/") {
+		strings.HasPrefix(r.URL.Path, "/assets/") ||
+		strings.HasPrefix(r.URL.Path, "/api/v1/resources/") {
 		return staticCacheControl, staticCDNCacheControl
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		return apiCacheControl, apiCDNCacheControl
 	}
 	return noStoreCacheControl, noStoreCacheControl
 }

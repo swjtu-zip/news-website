@@ -185,6 +185,7 @@ func TestCacheHeaders(t *testing.T) {
 	}{
 		{name: "html", method: http.MethodGet, path: "/", wantStatus: http.StatusOK, wantCache: staticCacheControl, wantCDN: staticCDNCacheControl},
 		{name: "guide", method: http.MethodGet, path: "/help/mcp", wantStatus: http.StatusOK, wantCache: staticCacheControl, wantCDN: staticCDNCacheControl},
+		{name: "resource api path", method: http.MethodGet, path: "/api/v1/resources/1", wantStatus: http.StatusNotFound, wantCache: errorCacheControl, wantCDN: errorCDNCacheControl},
 		{name: "api", method: http.MethodGet, path: "/api/v1/articles?page=1", wantStatus: http.StatusOK, wantCache: apiCacheControl, wantCDN: apiCDNCacheControl},
 		{name: "api error", method: http.MethodGet, path: "/api/v1/articles/1", wantStatus: http.StatusNotFound, wantCache: errorCacheControl, wantCDN: errorCDNCacheControl},
 		{name: "html error", method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound, wantCache: errorCacheControl, wantCDN: errorCDNCacheControl},
@@ -205,6 +206,12 @@ func TestCacheHeaders(t *testing.T) {
 				t.Errorf("CDN-Cache-Control = %q, want %q", got, test.wantCDN)
 			}
 		})
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/resources/1", nil)
+	cacheControl, cdnCacheControl := responseCachePolicy(request, http.StatusOK)
+	if cacheControl != staticCacheControl || cdnCacheControl != staticCDNCacheControl {
+		t.Fatalf("successful resource API path policy = %q / %q, want %q / %q", cacheControl, cdnCacheControl, staticCacheControl, staticCDNCacheControl)
 	}
 }
 
