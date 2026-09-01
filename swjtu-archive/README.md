@@ -18,7 +18,8 @@ go run ./cmd/swjtu-archive
 | `SWJTU_ARCHIVE_ADDR` | `:8080` | HTTP 监听地址 |
 | `SWJTU_ARCHIVE_INTERVAL` | `30m` | 自动同步间隔 |
 | `SWJTU_ARCHIVE_BACKFILL` | `8760h` | 首次/每次同步的回溯窗口 |
-| `SWJTU_ARCHIVE_MAX_PAGES` | `100` | 每个 feed 最多抓取页数 |
+| `SWJTU_ARCHIVE_MAX_PAGES` | `1000` | 每个 feed 最多抓取页数 |
+| `SWJTU_ARCHIVE_REFRESH_AFTER` | `24h` | 文章详情与资源的刷新间隔 |
 | `SWJTU_ARCHIVE_SYNC_ON_START` | `true` | 是否启动时同步 |
 
 ## 访问
@@ -29,6 +30,20 @@ go run ./cmd/swjtu-archive
 - 详情：`GET /api/v1/articles/{id}`
 - 资源：`GET /assets/{id}`
 - 同步状态：`GET /api/v1/sync/status`
+- MCP：`http://localhost:8080/mcp`（Streamable HTTP）
+- MCP 配置指南：`http://localhost:8080/help/mcp`
+
+## MCP
+
+将支持 Streamable HTTP 的 MCP 客户端连接到 `http://localhost:8080/mcp`。端点是无会话、只读的，支持当前 `2026-07-28` 协议，并保留 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 客户端的握手兼容。它提供：
+
+- `list_feeds`：查询可用新闻来源与过滤 ID
+- `query_articles`：按站点、类别、Feed、日期和分页查询文章
+- `search_articles`：对标题、正文和来源进行全文检索
+- `get_article`：查看完整正文以及图片、附件列表
+- `download_resource`：取得图片或附件的 MCP 资源 URI 与 HTTP 下载地址
+
+客户端也可以读取 `swjtu://articles/{id}` 和 `swjtu://resources/{id}`；后者通过 MCP `resources/read` 返回 base64 编码的原始文件。大文件或需要保存到磁盘时，优先使用工具返回的 `/assets/{id}` HTTP 地址流式下载。
 
 当前服务完全公开，不提供公网管理写接口。同步由后台定时器负责；后续可在独立内网端口增加管理接口。
 

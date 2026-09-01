@@ -35,7 +35,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxPages, err := intEnv("SWJTU_ARCHIVE_MAX_PAGES", 100)
+	maxPages, err := intEnv("SWJTU_ARCHIVE_MAX_PAGES", 1000)
 	if err != nil {
 		return Config{}, err
 	}

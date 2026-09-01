@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS articles (
     site_name TEXT NOT NULL DEFAULT '',
     feed_id TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL DEFAULT '',
+    article_type TEXT NOT NULL DEFAULT '',
     published_at TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL DEFAULT '',
     content_html TEXT NOT NULL DEFAULT '',
@@ -137,6 +138,10 @@ func Open(dbPath string) (*Store, error) {
 		store.Close()
 		return nil, fmt.Errorf("migrate sqlite: %w", err)
 	}
+	if err := ensureArticleTypeColumn(db); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("migrate article type: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Join(dataDir, "tmp"), 0o755); err != nil {
 		store.Close()
 		return nil, fmt.Errorf("create temporary directory: %w", err)
@@ -148,6 +153,21 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // DataDir returns the root directory used for the archive.
 func (s *Store) DataDir() string { return s.dataDir }
+
+// ensureArticleTypeColumn upgrades archives created before article_type was
+// introduced. SQLite's CREATE TABLE IF NOT EXISTS does not alter an existing
+// table, so the small idempotent migration is needed for the deployed DB.
+func ensureArticleTypeColumn(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('articles') WHERE name='article_type'`).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return nil
+	}
+	_, err := db.Exec(`ALTER TABLE articles ADD COLUMN article_type TEXT NOT NULL DEFAULT ''`)
+	return err
+}
 
 // SaveRaw stores a complete source page and returns its relative path and hash.
 func (s *Store) SaveRaw(data []byte) (string, string, error) {
@@ -262,21 +282,39 @@ func (s *Store) UpsertArticle(input ArticleInput) (int64, error) {
 	if date == "" {
 		date = input.Item.Date
 	}
+	publishedAt := input.Article.PublishedAt
+	if publishedAt == "" {
+		publishedAt = input.Item.PublishedAt
+	}
+	if publishedAt == "" {
+		publishedAt = date
+	}
+	publishedAt = normalizePublishedAt(publishedAt)
+	if date == "" {
+		date = publishedAt
+	}
 	date = normalizeDate(date)
+	articleType := strings.TrimSpace(input.Article.Type)
+	if articleType == "" {
+		articleType = strings.TrimSpace(input.Item.Type)
+	}
+	if articleType == "" {
+		articleType = strings.TrimSpace(input.Feed.Name)
+	}
 	_, err := s.db.Exec(`INSERT INTO articles
-(canonical_url, title, source, site_id, site_name, feed_id, category, published_at, content, content_html,
+(canonical_url, title, source, site_id, site_name, feed_id, category, article_type, published_at, content, content_html,
  author, photographer, editor, raw_path, raw_sha256, first_seen_at, last_seen_at, last_fetched_at,
  fetch_status, last_error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success', '')
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success', '')
 ON CONFLICT(canonical_url) DO UPDATE SET title=excluded.title, source=excluded.source,
 site_id=excluded.site_id, site_name=excluded.site_name, feed_id=excluded.feed_id,
-category=excluded.category, published_at=excluded.published_at, content=excluded.content,
+category=excluded.category, article_type=excluded.article_type, published_at=excluded.published_at, content=excluded.content,
 content_html=excluded.content_html, author=excluded.author, photographer=excluded.photographer,
 editor=excluded.editor, raw_path=CASE WHEN excluded.raw_path='' THEN articles.raw_path ELSE excluded.raw_path END,
 raw_sha256=CASE WHEN excluded.raw_sha256='' THEN articles.raw_sha256 ELSE excluded.raw_sha256 END,
 last_seen_at=excluded.last_seen_at, last_fetched_at=excluded.last_fetched_at,
 fetch_status='success', last_error=''`, input.Item.URL, title, input.Article.Source, input.Feed.SiteID,
-		input.Feed.SiteName, input.Feed.ID, input.Feed.Category, date, input.Article.Content,
+		input.Feed.SiteName, input.Feed.ID, input.Feed.Category, articleType, publishedAt, input.Article.Content,
 		input.Article.ContentHTML, input.Article.Author, input.Article.Photographer, input.Article.Editor,
 		input.RawPath, input.RawSHA256, now, now, now)
 	if err != nil {
@@ -381,6 +419,7 @@ type ArticleSummary struct {
 	SiteName     string `json:"site_name"`
 	FeedID       string `json:"feed_id"`
 	Category     string `json:"category"`
+	Type         string `json:"type"`
 	PublishedAt  string `json:"published_at"`
 	CanonicalURL string `json:"canonical_url"`
 	Author       string `json:"author,omitempty"`
@@ -411,7 +450,7 @@ func (s *Store) FindArticles(filter ArticleFilter) ([]ArticleSummary, int, error
 	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count articles: %w", err)
 	}
-	query := `SELECT a.id, a.title, a.source, a.site_id, a.site_name, a.feed_id, a.category,
+	query := `SELECT a.id, a.title, a.source, a.site_id, a.site_name, a.feed_id, a.category, a.article_type,
 a.published_at, a.canonical_url, a.author, a.fetch_status FROM articles a ` + join + ` WHERE ` + where +
 		` ORDER BY CASE WHEN a.published_at = '' THEN 1 ELSE 0 END, a.published_at DESC, a.id DESC LIMIT ? OFFSET ?`
 	args = append(args, filter.PageSize, (filter.Page-1)*filter.PageSize)
@@ -424,7 +463,7 @@ a.published_at, a.canonical_url, a.author, a.fetch_status FROM articles a ` + jo
 	for rows.Next() {
 		var item ArticleSummary
 		if err := rows.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
-			&item.Category, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status); err != nil {
+			&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, item)
@@ -463,10 +502,18 @@ a.title LIKE ? OR a.content LIKE ? OR a.source LIKE ? OR a.site_name LIKE ?)`)
 		args = append(args, filter.From)
 	}
 	if filter.To != "" {
-		conditions = append(conditions, "a.published_at <= ?")
-		args = append(args, filter.To)
+		conditions = append(conditions, "a.published_at < ?")
+		args = append(args, nextDateBoundary(filter.To))
 	}
 	return strings.Join(conditions, " AND "), args, join
+}
+
+func nextDateBoundary(value string) string {
+	parsed, err := time.Parse("2006-01-02", strings.TrimSpace(value))
+	if err != nil {
+		return value + "\x7f"
+	}
+	return parsed.AddDate(0, 0, 1).Format("2006-01-02")
 }
 
 func makeFTSQuery(value string) string {
@@ -497,12 +544,12 @@ type ArticleRecord struct {
 }
 
 func (s *Store) GetArticle(id int64) (*ArticleRecord, error) {
-	row := s.db.QueryRow(`SELECT id, title, source, site_id, site_name, feed_id, category, published_at,
+	row := s.db.QueryRow(`SELECT id, title, source, site_id, site_name, feed_id, category, article_type, published_at,
 canonical_url, author, fetch_status, content, content_html, raw_path, raw_sha256, photographer, editor,
 first_seen_at, last_seen_at, last_fetched_at, last_error FROM articles WHERE id=?`, id)
 	item := &ArticleRecord{}
 	err := row.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
-		&item.Category, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status, &item.Content,
+		&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status, &item.Content,
 		&item.ContentHTML, &item.RawPath, &item.RawSHA256, &item.Photographer, &item.Editor,
 		&item.FirstSeenAt, &item.LastSeenAt, &item.LastFetchedAt, &item.LastError)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -643,6 +690,34 @@ GROUP BY site_id, site_name ORDER BY COUNT(*) DESC, site_id`)
 }
 
 var dateFormats = []string{"2006-01-02", "2006/01/02", "2006.01.02", "2006年01月02日", "2006-1-2", "2006/1/2", "2006年1月2日", "2006.1.2"}
+
+var dateTimeFormats = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04",
+	"2006/01/02 15:04:05",
+	"2006/01/02 15:04",
+	"2006.01.02 15:04:05",
+	"2006.01.02 15:04",
+	"2006年1月2日 15时04分05秒",
+	"2006年1月2日 15时04分",
+	"2006年1月2日 15:04:05",
+	"2006年1月2日 15:04",
+	"Mon Jan 02 15:04:05 MST 2006",
+}
+
+// normalizePublishedAt keeps second/minute precision when the source
+// exposes it. Date-only values remain YYYY-MM-DD for backwards compatibility.
+func normalizePublishedAt(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	for _, format := range dateTimeFormats {
+		if parsed, err := time.Parse(format, value); err == nil {
+			return parsed.Format("2006-01-02 15:04:05")
+		}
+	}
+	return normalizeDate(value)
+}
 
 var embeddedDate = regexp.MustCompile(`(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})`)
 

@@ -29,10 +29,10 @@ func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 		t.Fatalf("raw content was not content-addressed: %q/%q %q/%q", rawPath, rawHash, secondPath, secondHash)
 	}
 
-	item := sdk.NewsItem{Title: "人工智能与交通发展", URL: "https://news.swjtu.edu.cn/info/1/2.htm", Date: "2026/08/31"}
+	item := sdk.NewsItem{Title: "人工智能与交通发展", URL: "https://news.swjtu.edu.cn/info/1/2.htm", Date: "2026/08/31", Type: "交大要闻"}
 	articleID, err := store.UpsertArticle(ArticleInput{
 		Feed: feed, Item: item, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now(),
-		Article: &sdk.Article{Title: item.Title, Source: "新闻网", Date: item.Date, Content: "学校开展人工智能交通研究", ContentHTML: "<p>学校开展人工智能交通研究</p>"},
+		Article: &sdk.Article{Title: item.Title, Source: "新闻网", Date: item.Date, PublishedAt: "2026-08-31 14:34", Type: item.Type, Content: "学校开展人工智能交通研究", ContentHTML: "<p>学校开展人工智能交通研究</p>"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -54,12 +54,15 @@ func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 1 || len(items) != 1 || items[0].ID != articleID || items[0].PublishedAt != "2026-08-31" {
+	if total != 1 || len(items) != 1 || items[0].ID != articleID || items[0].PublishedAt != "2026-08-31 14:34:00" || items[0].Type != "交大要闻" {
 		t.Fatalf("unexpected search result: total=%d items=%+v", total, items)
 	}
 	full, err := store.GetArticle(articleID)
 	if err != nil || len(full.Resources) != 1 || full.Resources[0].ID != resourceID {
 		t.Fatalf("unexpected article: %+v (%v)", full, err)
+	}
+	if full.Type != "交大要闻" || full.PublishedAt != "2026-08-31 14:34:00" {
+		t.Fatalf("metadata precision/type was not retained: type=%q published_at=%q", full.Type, full.PublishedAt)
 	}
 	file, err := store.OpenResource(&full.Resources[0])
 	if err != nil {
@@ -98,6 +101,22 @@ func TestNormalizeDate(t *testing.T) {
 	for input, want := range cases {
 		if got := normalizeDate(input); got != want {
 			t.Errorf("normalizeDate(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestNormalizePublishedAt(t *testing.T) {
+	cases := map[string]string{
+		"2026-08-11 14:34":     "2026-08-11 14:34:00",
+		"2026/08/11 14:34:05":  "2026-08-11 14:34:05",
+		"2026-08-11T14:34:00Z": "2026-08-11 14:34:00",
+		"2026年8月11日 14时34分":    "2026-08-11 14:34:00",
+		"2026-08-11":           "2026-08-11",
+		"无效日期":                 "",
+	}
+	for input, want := range cases {
+		if got := normalizePublishedAt(input); got != want {
+			t.Errorf("normalizePublishedAt(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

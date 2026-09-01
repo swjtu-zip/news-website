@@ -161,6 +161,12 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+		// The feed/tab is the authoritative type when a site does not expose a
+		// separate article-type field. Keep it on the item so the archive and
+		// downstream APIs do not lose which tab produced the article.
+		if item.Type == "" {
+			item.Type = feed.Name
+		}
 		fresh, err := s.store.ArticleFresh(item.URL, now, s.opts.RefreshAfter)
 		if err != nil {
 			result.Failures++
@@ -184,6 +190,15 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 			result.Errors = append(result.Errors, fmt.Sprintf("抓取 %s: %v", item.URL, err))
 			continue
 		}
+		if article.Type == "" {
+			article.Type = item.Type
+		}
+		if article.PublishedAt == "" {
+			article.PublishedAt = item.PublishedAt
+		}
+		if article.Date == "" {
+			article.Date = item.Date
+		}
 		rawPath, rawHash, err := s.store.SaveRaw(raw)
 		if err != nil {
 			result.Failures++
@@ -191,7 +206,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 			continue
 		}
 		articleID, err := s.store.UpsertArticle(ArticleInput{
-			Feed: feed, Item: item, Article: article, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: now,
+			Feed: feed, Item: item, Article: article, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now(),
 		})
 		if err != nil {
 			result.Failures++
@@ -206,7 +221,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 				continue
 			}
 			seen[resourceURL] = true
-			downloaded, err := s.archiveResource(ctx, articleID, "image", resourceURL, "")
+			downloaded, err := s.archiveResource(ctx, articleID, "image", resourceURL, "", item.URL)
 			if downloaded {
 				result.Resources++
 			}
@@ -220,7 +235,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 				continue
 			}
 			seen[attachment.URL] = true
-			downloaded, err := s.archiveResource(ctx, articleID, "attachment", attachment.URL, attachment.Name)
+			downloaded, err := s.archiveResource(ctx, articleID, "attachment", attachment.URL, attachment.Name, item.URL)
 			if downloaded {
 				result.Resources++
 			}
@@ -233,7 +248,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 	return result, nil
 }
 
-func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, resourceURL, preferredName string) (bool, error) {
+func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, resourceURL, preferredName, referer string) (bool, error) {
 	if existing, err := s.store.ExistingResource(articleID, kind, resourceURL); err == nil && existing.Status == "success" && existing.LocalPath != "" {
 		if file, openErr := s.store.OpenResource(existing); openErr == nil {
 			file.Close()
@@ -245,7 +260,7 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		if err := s.waitRequest(ctx); err != nil {
 			return false, err
 		}
-		resource, err := s.client.DownloadResource(ctx, resourceURL)
+		resource, err := s.client.DownloadResourceWithReferer(ctx, resourceURL, referer)
 		if err != nil {
 			lastErr = err
 			continue
