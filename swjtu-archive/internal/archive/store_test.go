@@ -82,3 +82,22 @@ func TestSaveResourceBodyRejectsOversize(t *testing.T) {
 		t.Fatal("expected size limit error")
 	}
 }
+
+func TestNormalizeDate(t *testing.T) {
+	cases := map[string]string{
+		"2026-08-22":           "2026-08-22",
+		"2026/8/2":             "2026-08-02",
+		"2026年8月2日":            "2026-08-02",
+		"日期：2026/08/22":        "2026-08-22",
+		"2026-08-11 14:34":     "2026-08-11",
+		"2026-08-11T14:34:00Z": "2026-08-11",
+		"黄曙光":                  "",
+		"":                     "",
+		"not a date at all":    "",
+	}
+	for input, want := range cases {
+		if got := normalizeDate(input); got != want {
+			t.Errorf("normalizeDate(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

@@ -14,6 +14,7 @@ type Config struct {
 	DataDir          string
 	Addr             string
 	Interval         time.Duration
+	SyncTimes        []string // daily trigger times "HH:MM" in Asia/Shanghai; overrides Interval when set
 	Backfill         time.Duration
 	MaxPages         int
 	SyncOnStart      bool
@@ -58,6 +59,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	syncTimes, err := timesEnv("SWJTU_ARCHIVE_SYNC_TIMES")
+	if err != nil {
+		return Config{}, err
+	}
 	if interval <= 0 || backfill <= 0 || maxPages <= 0 || maxConcurrent <= 0 || gap < 0 || maxBytes <= 0 {
 		return Config{}, fmt.Errorf("invalid non-positive crawler configuration")
 	}
@@ -65,6 +70,7 @@ func Load() (Config, error) {
 		DataDir:          dataDir,
 		Addr:             env("SWJTU_ARCHIVE_ADDR", ":8080"),
 		Interval:         interval,
+		SyncTimes:        syncTimes,
 		Backfill:         backfill,
 		MaxPages:         maxPages,
 		SyncOnStart:      syncOnStart,
@@ -73,6 +79,29 @@ func Load() (Config, error) {
 		RefreshAfter:     refreshAfter,
 		MaxResourceBytes: maxBytes,
 	}, nil
+}
+
+// timesEnv parses a comma-separated list of daily trigger times ("12:00,18:00").
+func timesEnv(key string) ([]string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil, nil
+	}
+	var times []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		hour, minute, ok := strings.Cut(part, ":")
+		if !ok {
+			return nil, fmt.Errorf("%s: invalid time %q, want HH:MM", key, part)
+		}
+		h, errH := strconv.Atoi(hour)
+		m, errM := strconv.Atoi(minute)
+		if errH != nil || errM != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+			return nil, fmt.Errorf("%s: invalid time %q, want HH:MM", key, part)
+		}
+		times = append(times, fmt.Sprintf("%02d:%02d", h, m))
+	}
+	return times, nil
 }
 
 func (c Config) DBPath() string { return filepath.Join(c.DataDir, "archive.db") }

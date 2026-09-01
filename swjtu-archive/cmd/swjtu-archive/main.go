@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -96,6 +98,12 @@ func runServer(cfg config.Config, syncer *archive.Syncer, logger *log.Logger) {
 
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
+	var scheduled <-chan time.Time
+	if len(cfg.SyncTimes) > 0 {
+		ticker.Stop()
+		scheduled = dailySchedule(ctx, cfg.SyncTimes)
+		logger.Printf("scheduled daily syncs at %s (Asia/Shanghai)", strings.Join(cfg.SyncTimes, ", "))
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -103,8 +111,56 @@ func runServer(cfg config.Config, syncer *archive.Syncer, logger *log.Logger) {
 			_ = server.Shutdown(shutdownCtx)
 			cancel()
 			return
+		case <-scheduled:
+			go runSync()
 		case <-ticker.C:
 			go runSync()
 		}
 	}
+}
+
+// dailySchedule emits the next occurrence of each "HH:MM" trigger time,
+// evaluated in Asia/Shanghai (with a fixed +08:00 fallback for minimal
+// images without tzdata).
+func dailySchedule(ctx context.Context, times []string) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	go func() {
+		defer close(ch)
+		loc, err := time.LoadLocation("Asia/Shanghai")
+		if err != nil {
+			loc = time.FixedZone("CST", 8*60*60)
+		}
+		for {
+			next := nextDailyRun(time.Now().In(loc), times, loc)
+			timer := time.NewTimer(time.Until(next))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case now := <-timer.C:
+				select {
+				case ch <- now:
+				default:
+				}
+			}
+		}
+	}()
+	return ch
+}
+
+func nextDailyRun(now time.Time, times []string, loc *time.Location) time.Time {
+	best := now.Add(48 * time.Hour)
+	for _, value := range times {
+		hour, minute, _ := strings.Cut(value, ":")
+		h, _ := strconv.Atoi(hour)
+		m, _ := strconv.Atoi(minute)
+		candidate := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, loc)
+		if !candidate.After(now) {
+			candidate = candidate.Add(24 * time.Hour)
+		}
+		if candidate.Before(best) {
+			best = candidate
+		}
+	}
+	return best
 }

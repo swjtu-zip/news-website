@@ -11,7 +11,8 @@ services:
     environment:
       SWJTU_ARCHIVE_DATA: /data
       SWJTU_ARCHIVE_ADDR: :8080
-      SWJTU_ARCHIVE_INTERVAL: 30m
+      SWJTU_ARCHIVE_SYNC_TIMES: "12:00,18:00"
+      SWJTU_ARCHIVE_SYNC_ON_START: "false"
       SWJTU_ARCHIVE_BACKFILL: 1y
       SWJTU_ARCHIVE_MAX_PAGES: "100"
     volumes:

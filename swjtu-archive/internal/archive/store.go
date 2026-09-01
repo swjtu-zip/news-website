@@ -616,8 +616,39 @@ func (s *Store) Stats() (Stats, error) {
 	return stats, nil
 }
 
-var dateFormats = []string{"2006-01-02", "2006/01/02", "2006.01.02", "2006年01月02日", "2006-1-2", "2006/1/2"}
+// SiteFacet is a per-source article count used to render filter sidebars.
+type SiteFacet struct {
+	SiteID   string `json:"site_id"`
+	SiteName string `json:"site_name"`
+	Count    int    `json:"count"`
+}
 
+// SiteFacets returns article counts grouped by source site, most articles first.
+func (s *Store) SiteFacets() ([]SiteFacet, error) {
+	rows, err := s.db.Query(`SELECT site_id, site_name, COUNT(*) FROM articles
+GROUP BY site_id, site_name ORDER BY COUNT(*) DESC, site_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var facets []SiteFacet
+	for rows.Next() {
+		var facet SiteFacet
+		if err := rows.Scan(&facet.SiteID, &facet.SiteName, &facet.Count); err != nil {
+			return nil, err
+		}
+		facets = append(facets, facet)
+	}
+	return facets, rows.Err()
+}
+
+var dateFormats = []string{"2006-01-02", "2006/01/02", "2006.01.02", "2006年01月02日", "2006-1-2", "2006/1/2", "2006年1月2日", "2006.1.2"}
+
+var embeddedDate = regexp.MustCompile(`(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})`)
+
+// normalizeDate returns an ISO "2006-01-02" date, or "" when the input does
+// not contain a plausible calendar date (scrapers occasionally pick up
+// author names or other non-date text).
 func normalizeDate(value string) string {
 	value = strings.TrimSpace(value)
 	for _, format := range dateFormats {
@@ -633,7 +664,13 @@ func normalizeDate(value string) string {
 			}
 		}
 	}
-	return value
+	if match := embeddedDate.FindStringSubmatch(value); match != nil {
+		candidate := match[1] + "-" + match[2] + "-" + match[3]
+		if parsed, err := time.Parse("2006-1-2", candidate); err == nil {
+			return parsed.Format("2006-01-02")
+		}
+	}
+	return ""
 }
 
 var unsafeFilename = regexp.MustCompile(`[^\p{L}\p{N}._-]+`)
