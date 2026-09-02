@@ -120,6 +120,26 @@ func TestTouchArticleMetadataUpgradesLegacyListing(t *testing.T) {
 	}
 }
 
+func TestPreferIncomingArticleTypeUpgradesRouteLabels(t *testing.T) {
+	feed := sdk.Feed{Slug: "xwtz/xyxw", Name: "xwtz/xyxw"}
+	cases := []struct {
+		candidate string
+		current   string
+		want      bool
+	}{
+		{candidate: "学院新闻", current: "xwtz/xyxw", want: true},
+		{candidate: "研究生", current: "学院新闻", want: true},
+		{candidate: "学院新闻", current: "材料要闻", want: true},
+		{candidate: "首页新闻", current: "研究生", want: false},
+		{candidate: "本科生", current: "研究生", want: false},
+	}
+	for _, tc := range cases {
+		if got := preferIncomingArticleType(tc.candidate, tc.current, feed); got != tc.want {
+			t.Errorf("preferIncomingArticleType(%q, %q) = %v, want %v", tc.candidate, tc.current, got, tc.want)
+		}
+	}
+}
+
 func TestStartRunUsesProcessLock(t *testing.T) {
 	dbPath := t.TempDir() + "/archive.db"
 	first, err := Open(dbPath)

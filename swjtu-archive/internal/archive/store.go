@@ -383,7 +383,7 @@ FROM articles WHERE canonical_url = ?`, canonicalURL).Scan(
 	if articleType == "" {
 		articleType = strings.TrimSpace(feed.Name)
 	}
-	if existing.articleType != "" && !(existing.articleType == "首页新闻" && articleType != "" && articleType != "首页新闻") {
+	if existing.articleType != "" && !preferIncomingArticleType(articleType, existing.articleType, feed) {
 		articleType = existing.articleType
 	}
 
@@ -408,6 +408,40 @@ article_type=?, published_at=?, last_seen_at=? WHERE canonical_url=?`,
 		title, feed.SiteID, feed.SiteName, feedID, feed.Category, articleType,
 		publishedAt, now.UTC().Format(time.RFC3339Nano), canonicalURL)
 	return err
+}
+
+// preferIncomingArticleType upgrades values that came from a generic
+// homepage or a route slug when a later tab parser supplies a real section
+// label. It deliberately does not replace one specific section with another
+// merely because the article was also listed in a second tab.
+func preferIncomingArticleType(candidate, current string, feed sdk.Feed) bool {
+	candidate = strings.TrimSpace(candidate)
+	current = strings.TrimSpace(current)
+	if candidate == "" || candidate == current {
+		return false
+	}
+	if current == "" {
+		return true
+	}
+	if current == "首页新闻" {
+		return candidate != "首页新闻"
+	}
+	if current == feed.Name || current == feed.Slug || strings.Contains(current, "/") {
+		return true
+	}
+	if current == "材料要闻" {
+		return true
+	}
+	return isGenericArticleType(current) && !isGenericArticleType(candidate)
+}
+
+func isGenericArticleType(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "学院新闻", "全部通知", "新闻通知", "首页新闻":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasPublishedTime(value string) bool {
