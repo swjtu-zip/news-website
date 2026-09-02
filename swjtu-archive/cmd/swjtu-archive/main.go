@@ -30,7 +30,16 @@ func main() {
 	}
 	defer store.Close()
 
-	client := sdk.New(sdk.Options{})
+	// Listing/detail pages use the scraper's own bounded client. Resource
+	// downloads need a separate response-header bound as well: a number of
+	// legacy image hosts accept the connection but never send headers, which
+	// otherwise makes each failed asset consume the full body timeout.
+	resourceTransport := http.DefaultTransport.(*http.Transport).Clone()
+	resourceTransport.ResponseHeaderTimeout = 10 * time.Second
+	client := sdk.New(sdk.Options{HTTPClient: &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: resourceTransport,
+	}})
 	syncer := archive.NewSyncer(store, client, archive.SyncOptions{
 		Backfill: cfg.Backfill, MaxPages: cfg.MaxPages, MaxConcurrent: cfg.MaxConcurrent,
 		RequestGap: cfg.RequestGap, RefreshAfter: cfg.RefreshAfter,

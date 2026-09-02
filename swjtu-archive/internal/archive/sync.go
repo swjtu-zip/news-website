@@ -2,8 +2,10 @@ package archive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
@@ -263,6 +265,12 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		resource, err := s.client.DownloadResourceWithReferer(ctx, resourceURL, referer)
 		if err != nil {
 			lastErr = err
+			// A response-header timeout is deterministic for a dead legacy
+			// asset host. Retrying it three times only stalls the whole feed;
+			// keep the failure recorded and move on to the next resource.
+			if !resourceRetryable(err) {
+				break
+			}
 			continue
 		}
 		filename := resource.Filename
@@ -294,6 +302,17 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		Filename: safeFilename(preferredName), Status: "failed", Error: lastErr.Error(), UpdatedAt: time.Now(),
 	})
 	return false, lastErr
+}
+
+func resourceRetryable(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	return true
 }
 
 func (s *Syncer) siteLock(siteID string) *sync.Mutex {
