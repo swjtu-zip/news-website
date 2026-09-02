@@ -29,4 +29,16 @@ func TestResourceRetryable(t *testing.T) {
 	if resourceRetryable(fmt.Errorf("wrapped: %w", context.Canceled)) {
 		t.Fatal("cancellation should not be retried")
 	}
+	for _, err := range []error{
+		errors.New("fetch resource: status 400"),
+		errors.New("fetch resource: status 404"),
+		errors.New("fetch resource: received HTML instead of a downloadable resource"),
+	} {
+		if resourceRetryable(err) {
+			t.Fatalf("deterministic resource error should not be retried: %v", err)
+		}
+	}
+	if !resourceRetryable(errors.New("fetch resource: status 429")) {
+		t.Fatal("rate limiting should be retried")
+	}
 }

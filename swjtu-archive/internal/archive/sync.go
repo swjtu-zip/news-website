@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -307,6 +308,16 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 func resourceRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
+	}
+	message := err.Error()
+	if strings.Contains(message, "received HTML instead of a downloadable resource") {
+		return false
+	}
+	if index := strings.LastIndex(message, "status "); index >= 0 {
+		var status int
+		if _, scanErr := fmt.Sscanf(message[index:], "status %d", &status); scanErr == nil && status >= 400 && status < 500 && status != 429 {
+			return false
+		}
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
