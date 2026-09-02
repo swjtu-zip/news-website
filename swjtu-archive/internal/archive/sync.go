@@ -176,7 +176,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 			continue
 		}
 		if fresh {
-			if err := s.store.TouchArticle(item.URL, now); err != nil {
+			if err := s.store.TouchArticleMetadata(item.URL, feed, item, now); err != nil {
 				result.Failures++
 				result.Errors = append(result.Errors, fmt.Sprintf("更新 %s: %v", item.URL, err))
 			}

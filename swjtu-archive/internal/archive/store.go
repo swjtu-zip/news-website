@@ -354,6 +354,64 @@ func (s *Store) TouchArticle(canonicalURL string, now time.Time) error {
 	return err
 }
 
+// TouchArticleMetadata refreshes fields that are available from a listing
+// without downloading the detail page again. This matters when a new adapter
+// exposes a more specific tab/feed for an article that was already fetched by
+// an older adapter version.
+func (s *Store) TouchArticleMetadata(canonicalURL string, feed sdk.Feed, item sdk.NewsItem, now time.Time) error {
+	var existing struct {
+		title, feedID, articleType, publishedAt string
+	}
+	if err := s.db.QueryRow(`SELECT title, feed_id, article_type, published_at
+FROM articles WHERE canonical_url = ?`, canonicalURL).Scan(
+		&existing.title, &existing.feedID, &existing.articleType, &existing.publishedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+
+	title := existing.title
+	if strings.TrimSpace(title) == "" {
+		title = item.Title
+	}
+
+	articleType := strings.TrimSpace(item.Type)
+	if articleType == "" {
+		articleType = strings.TrimSpace(feed.Name)
+	}
+	if existing.articleType != "" && !(existing.articleType == "首页新闻" && articleType != "" && articleType != "首页新闻") {
+		articleType = existing.articleType
+	}
+
+	feedID := existing.feedID
+	// Keep a specific tab when the same URL is also listed on the generic
+	// homepage, but upgrade legacy homepage rows when a specific tab sees it.
+	if feedID == "" || (feed.Slug != "index" && strings.HasSuffix(feedID, ":index")) {
+		feedID = feed.ID
+	}
+
+	publishedAt := existing.publishedAt
+	incomingPublishedAt := normalizePublishedAt(item.PublishedAt)
+	if incomingPublishedAt == "" {
+		incomingPublishedAt = normalizePublishedAt(item.Date)
+	}
+	if publishedAt == "" || (hasPublishedTime(incomingPublishedAt) && !hasPublishedTime(publishedAt)) {
+		publishedAt = incomingPublishedAt
+	}
+
+	_, err := s.db.Exec(`UPDATE articles SET title=?, site_id=?, site_name=?, feed_id=?, category=?,
+article_type=?, published_at=?, last_seen_at=? WHERE canonical_url=?`,
+		title, feed.SiteID, feed.SiteName, feedID, feed.Category, articleType,
+		publishedAt, now.UTC().Format(time.RFC3339Nano), canonicalURL)
+	return err
+}
+
+func hasPublishedTime(value string) bool {
+	return len(strings.TrimSpace(value)) > len("2006-01-02")
+}
+
 // ResourceInput describes one image or attachment linked by an article.
 type ResourceInput struct {
 	ArticleID   int64

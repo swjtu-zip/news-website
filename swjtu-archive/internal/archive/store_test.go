@@ -75,6 +75,51 @@ func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 	}
 }
 
+func TestTouchArticleMetadataUpgradesLegacyListing(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	home := sdk.Feed{ID: "sic:index", SiteID: "sic", SiteName: "集成电路科学与工程学院", Category: "college", Slug: "index", Name: "首页新闻", BaseURL: "https://sic.swjtu.edu.cn"}
+	if err := store.UpsertFeed(home, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	item := sdk.NewsItem{Title: "旧标题", URL: "https://sic.swjtu.edu.cn/info/1/2.htm", Date: "2026-08-28"}
+	if _, err := store.UpsertArticle(ArticleInput{
+		Feed: home, Item: item, FetchedAt: time.Now(),
+		Article: &sdk.Article{Title: item.Title, Date: item.Date, Content: "正文"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	specific := sdk.Feed{ID: "sic:xydt", SiteID: "sic", SiteName: home.SiteName, Category: "college", Slug: "xydt", Name: "xydt", BaseURL: home.BaseURL}
+	if err := store.TouchArticleMetadata(item.URL, specific, sdk.NewsItem{
+		Title: "列表标题", URL: item.URL, Date: "2026/08/28", PublishedAt: "2026/08/28 17:03:55", Type: "学院动态",
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	article, err := store.GetArticle(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if article.Type != "学院动态" || article.FeedID != "sic:xydt" || article.PublishedAt != "2026-08-28 17:03:55" || article.Title != "旧标题" {
+		t.Fatalf("metadata upgrade = type=%q feed=%q published=%q title=%q", article.Type, article.FeedID, article.PublishedAt, article.Title)
+	}
+
+	if err := store.TouchArticleMetadata(item.URL, home, sdk.NewsItem{URL: item.URL, Type: "首页新闻", Date: "2026-08-28"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	article, err = store.GetArticle(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if article.Type != "学院动态" || article.FeedID != "sic:xydt" || article.PublishedAt != "2026-08-28 17:03:55" {
+		t.Fatalf("generic listing downgraded metadata = type=%q feed=%q published=%q", article.Type, article.FeedID, article.PublishedAt)
+	}
+}
+
 func TestSaveResourceBodyRejectsOversize(t *testing.T) {
 	store, err := Open(t.TempDir() + "/archive.db")
 	if err != nil {
