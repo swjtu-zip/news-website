@@ -120,6 +120,34 @@ func TestTouchArticleMetadataUpgradesLegacyListing(t *testing.T) {
 	}
 }
 
+func TestStartRunUsesProcessLock(t *testing.T) {
+	dbPath := t.TempDir() + "/archive.db"
+	first, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	runID, err := first.StartRun(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.StartRun(time.Now()); err == nil {
+		t.Fatal("expected concurrent sync to be rejected")
+	}
+	if err := first.FinishRun(runID, "success", 1, 0, 0, 0, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.StartRun(time.Now()); err != nil {
+		t.Fatalf("sync lock was not released: %v", err)
+	}
+}
+
 func TestSaveResourceBodyRejectsOversize(t *testing.T) {
 	store, err := Open(t.TempDir() + "/archive.db")
 	if err != nil {

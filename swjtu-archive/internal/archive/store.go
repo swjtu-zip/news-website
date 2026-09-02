@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"swjtu-cli/pkg/sdk"
@@ -105,6 +106,7 @@ type Store struct {
 	dataDir  string
 	rawDir   string
 	assetDir string
+	runLock  *os.File
 }
 
 // Open opens or creates an archive rooted at the directory containing dbPath.
@@ -672,14 +674,30 @@ type RunRecord struct {
 }
 
 func (s *Store) StartRun(now time.Time) (int64, error) {
+	lockPath := filepath.Join(s.dataDir, "sync.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return 0, fmt.Errorf("open sync lock: %w", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return 0, fmt.Errorf("sync already running")
+		}
+		return 0, fmt.Errorf("acquire sync lock: %w", err)
+	}
 	result, err := s.db.Exec("INSERT INTO sync_runs (started_at, status) VALUES (?, 'running')", now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
 		return 0, err
 	}
+	s.runLock = lockFile
 	return result.LastInsertId()
 }
 
 func (s *Store) FinishRun(id int64, status string, feeds, articles, resources, failures int, runErr error, now time.Time) error {
+	defer s.releaseRunLock()
 	errorText := ""
 	if runErr != nil {
 		errorText = runErr.Error()
@@ -687,6 +705,15 @@ func (s *Store) FinishRun(id int64, status string, feeds, articles, resources, f
 	_, err := s.db.Exec(`UPDATE sync_runs SET finished_at=?, status=?, feeds=?, articles=?, resources=?, failures=?, error=? WHERE id=?`,
 		now.UTC().Format(time.RFC3339Nano), status, feeds, articles, resources, failures, errorText, id)
 	return err
+}
+
+func (s *Store) releaseRunLock() {
+	if s.runLock == nil {
+		return
+	}
+	_ = syscall.Flock(int(s.runLock.Fd()), syscall.LOCK_UN)
+	_ = s.runLock.Close()
+	s.runLock = nil
 }
 
 func (s *Store) LatestRun() (*RunRecord, error) {
