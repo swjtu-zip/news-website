@@ -156,11 +156,21 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 	if err := s.waitRequest(ctx); err != nil {
 		return feedResult{}, err
 	}
-	items, err := s.client.ListFeedRange(ctx, feed, now.Add(-s.opts.Backfill), now.Add(24*time.Hour), s.opts.MaxPages)
-	if err != nil {
-		return feedResult{}, err
-	}
 	var result feedResult
+	items, listErr := s.client.ListFeedRange(ctx, feed, now.Add(-s.opts.Backfill), now.Add(24*time.Hour), s.opts.MaxPages)
+	if listErr != nil {
+		if ctx.Err() != nil {
+			return result, listErr
+		}
+		// The scraper returns pages already obtained together with a later-page
+		// error. Persist those partial items, but make the feed failure visible
+		// in the run instead of silently dropping the whole feed.
+		result.Failures++
+		result.Errors = append(result.Errors, fmt.Sprintf("列表 %s: %v", feed.ID, listErr))
+		if len(items) == 0 {
+			return result, nil
+		}
+	}
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			return result, err
