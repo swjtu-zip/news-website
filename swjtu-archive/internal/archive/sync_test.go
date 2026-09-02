@@ -42,3 +42,16 @@ func TestResourceRetryable(t *testing.T) {
 		t.Fatal("rate limiting should be retried")
 	}
 }
+
+func TestIsDownloadableResourceURL(t *testing.T) {
+	for _, raw := range []string{"https://example.com/image.png", "http://example.com/file.pdf"} {
+		if !isDownloadableResourceURL(raw) {
+			t.Fatalf("expected downloadable URL: %q", raw)
+		}
+	}
+	for _, raw := range []string{"data:image/png;base64,abc", "javascript:void(0)", "/relative/file.pdf", ""} {
+		if isDownloadableResourceURL(raw) {
+			t.Fatalf("expected non-downloadable URL: %q", raw)
+		}
+	}
+}

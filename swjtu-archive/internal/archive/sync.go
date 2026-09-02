@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -252,6 +253,9 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 }
 
 func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, resourceURL, preferredName, referer string) (bool, error) {
+	if !isDownloadableResourceURL(resourceURL) {
+		return false, nil
+	}
 	if existing, err := s.store.ExistingResource(articleID, kind, resourceURL); err == nil && existing.Status == "success" && existing.LocalPath != "" {
 		if file, openErr := s.store.OpenResource(existing); openErr == nil {
 			file.Close()
@@ -303,6 +307,14 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		Filename: safeFilename(preferredName), Status: "failed", Error: lastErr.Error(), UpdatedAt: time.Now(),
 	})
 	return false, lastErr
+}
+
+func isDownloadableResourceURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
 }
 
 func resourceRetryable(err error) bool {
