@@ -9,8 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/PuerkitoBio/goquery"
@@ -21,10 +25,67 @@ import (
 
 // Server exposes the read-only archive UI and JSON API.
 type Server struct {
-	store *archive.Store
+	store     *archive.Store
+	diskMu    sync.Mutex
+	diskAt    time.Time
+	diskStats diskStats
+}
+
+// diskStats describes how much disk the archive occupies and how much space
+// remains on the underlying filesystem.
+type diskStats struct {
+	ArchiveBytes int64
+	DiskTotal    uint64
+	DiskFree     uint64
+	OK           bool
 }
 
 func NewServer(store *archive.Store) *Server { return &Server{store: store} }
+
+// diskUsage measures the archive's footprint by walking the data directory
+// and reads filesystem capacity from statfs. The walk can be slow on large
+// archives, so the result is cached for an hour.
+func (s *Server) diskUsage() diskStats {
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	if time.Since(s.diskAt) < time.Hour {
+		return s.diskStats
+	}
+	var stats diskStats
+	root := s.store.DataDir()
+	_ = filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if info, err := entry.Info(); err == nil {
+			stats.ArchiveBytes += info.Size()
+		}
+		return nil
+	})
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(root, &fs); err == nil {
+		stats.DiskTotal = fs.Blocks * uint64(fs.Bsize)
+		stats.DiskFree = fs.Bavail * uint64(fs.Bsize)
+		stats.OK = true
+	}
+	s.diskStats = stats
+	s.diskAt = time.Now()
+	return stats
+}
+
+func formatBytes(value uint64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	amount := float64(value)
+	unit := 0
+	for amount >= 1024 && unit < len(units)-1 {
+		amount /= 1024
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("%d B", value)
+	}
+	return fmt.Sprintf("%.1f %s", amount, units[unit])
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -227,6 +288,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		HasNext    bool
 		PrevURL    string
 		NextURL    string
+		DiskOK     bool
+		DiskText   string
 	}{
 		Items: items, Sites: sites, Pages: pageNumbers, Total: total, TotalPages: totalPages,
 		Page: filter.Page, PageSize: filter.PageSize,
@@ -234,6 +297,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Feed: filter.FeedID, From: filter.From, To: filter.To, HasPrev: filter.Page > 1,
 		HasNext: filter.Page*filter.PageSize < total,
 		PrevURL: pageURL(filter, month, filter.Page-1), NextURL: pageURL(filter, month, filter.Page+1),
+	}
+	if disk := s.diskUsage(); disk.OK {
+		data.DiskOK = true
+		data.DiskText = fmt.Sprintf("归档占用 %s · 磁盘可用 %s / %s",
+			formatBytes(uint64(disk.ArchiveBytes)), formatBytes(disk.DiskFree), formatBytes(disk.DiskTotal))
 	}
 	if err := indexTemplate.Execute(w, data); err != nil {
 		return
@@ -263,6 +331,7 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	start := time.Now()
 	idText := strings.Trim(strings.TrimPrefix(r.URL.Path, "/article/"), "/")
 	id, err := strconv.ParseInt(idText, 10, 64)
 	if err != nil || id <= 0 {
@@ -279,6 +348,8 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 		ContentHTML template.HTML
 		Images      []archive.ResourceRecord
 		Attachments []archive.ResourceRecord
+		RenderedAt  string
+		RenderMS    string
 	}{Item: item, ContentHTML: s.safeContent(item)}
 	for _, resource := range item.Resources {
 		if resource.Kind == "image" {
@@ -287,6 +358,8 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 			data.Attachments = append(data.Attachments, resource)
 		}
 	}
+	data.RenderMS = fmt.Sprintf("%.1f", float64(time.Since(start).Microseconds())/1000)
+	data.RenderedAt = time.Now().Format("2006-01-02 15:04:05")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Add("Vary", "Accept")
 	if prefersMarkdown(r) {
@@ -653,6 +726,8 @@ func contentDisposition(filename string) string {
 }
 
 const (
+	indexCacheControl     = "public, max-age=3600, s-maxage=3600"
+	indexCDNCacheControl  = "public, max-age=3600"
 	staticCacheControl    = "public, max-age=86400, s-maxage=31536000"
 	staticCDNCacheControl = "public, max-age=31536000"
 	apiCacheControl       = "public, max-age=0, s-maxage=120"
@@ -711,8 +786,12 @@ func responseCachePolicy(r *http.Request, status int) (string, string) {
 	if status >= http.StatusBadRequest {
 		return errorCacheControl, errorCDNCacheControl
 	}
-	if r.URL.Path == "/" ||
-		r.URL.Path == "/help/mcp" ||
+	// The index is a dynamic list (article counts, disk-usage footer), so it
+	// gets a one-hour cache while detail pages and assets stay long-lived.
+	if r.URL.Path == "/" {
+		return indexCacheControl, indexCDNCacheControl
+	}
+	if r.URL.Path == "/help/mcp" ||
 		strings.HasPrefix(r.URL.Path, "/article/") ||
 		strings.HasPrefix(r.URL.Path, "/assets/") ||
 		strings.HasPrefix(r.URL.Path, "/api/v1/resources/") {
@@ -813,6 +892,8 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 .pager a:hover{border-color:var(--primary);color:var(--primary);text-decoration:none}
 .pager .current{border-color:var(--primary);background:var(--primary);color:#fff}
 .pager .ellipsis{min-width:24px;text-align:center;color:var(--muted)}
+.footer{max-width:1500px;margin:0 auto;padding:0 20px 24px;text-align:center;color:var(--muted);font-size:12.5px}
+.footer span{display:inline-block;padding:6px 14px;border:1px solid var(--line);border-radius:99px;background:var(--card)}
 .pager .page-step{padding:0 14px}
 .jump-form{display:flex;align-items:center;gap:6px;margin-left:10px;color:var(--muted);font-size:12.5px}
 .jump-form input{width:62px;height:36px;padding:5px 7px;border:1px solid var(--line);border-radius:7px;background:var(--card);font:inherit;color:var(--text);text-align:center}
@@ -869,6 +950,7 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 </nav>{{end}}
 </main>
 </div>
+{{if .DiskOK}}<footer class="footer"><span>{{.DiskText}}</span></footer>{{end}}
 </body></html>`))
 
 var mcpGuideTemplate = template.Must(template.New("mcp-guide").Parse(`<!doctype html>
@@ -971,6 +1053,8 @@ h1{font-size:24px;line-height:1.45;text-align:center;margin:0 0 14px}
 .side-resources a:hover{background:#edf3fb;color:var(--primary);text-decoration:none}
 .attachment-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .attachment-size{color:var(--muted);font-size:11px;flex-shrink:0;margin-left:auto}
+.footer{max-width:1100px;margin:0 auto;padding:0 20px 28px;text-align:center;color:var(--muted);font-size:12.5px}
+.footer span{display:inline-block;padding:6px 14px;border:1px solid var(--line);border-radius:99px;background:var(--card)}
 @media (orientation:portrait), (max-width:760px){
 .bar-inner{padding:0 14px}.bar-main{height:48px;gap:9px}.bar-main .bar-title,.bar-divider{display:none}.bar-source{max-width:150px;flex-shrink:1}.bar-second{display:flex}.original-button{padding:6px 11px}.article-layout{padding:0 12px 38px}.paper{padding:26px 20px;margin-top:12px}h1{font-size:20px}
 }
@@ -988,4 +1072,5 @@ h1{font-size:24px;line-height:1.45;text-align:center;margin:0 0 14px}
 <div class="content">{{.ContentHTML}}</div>
 {{if .Attachments}}<section class="resources resources-inline"><h2>附件</h2><ul>{{range .Attachments}}<li><a href="/assets/{{.ID}}" download="{{.Filename}}">{{.Filename}}<span class="size">{{.ByteSize}} bytes</span></a></li>{{end}}</ul></section>{{end}}
 </main></div>
+<footer class="footer"><span>服务器于 {{.RenderedAt}} 提供，耗时 {{.RenderMS}} ms</span></footer>
 </body></html>`))

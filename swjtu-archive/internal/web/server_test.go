@@ -151,6 +151,29 @@ func TestIndexIncludesMCPGuideAndPageJump(t *testing.T) {
 	}
 }
 
+func TestIndexShowsDiskUsageFooter(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, _, err := store.SaveRaw([]byte("raw-page-body")); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	NewServer(store).Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, fragment := range []string{`class="footer"`, `归档占用`, `磁盘可用`} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("index did not contain %q", fragment)
+		}
+	}
+}
+
 func TestMCPGuideUsesRequestEndpoint(t *testing.T) {
 	store, err := archive.Open(t.TempDir() + "/archive.db")
 	if err != nil {
@@ -183,7 +206,7 @@ func TestCacheHeaders(t *testing.T) {
 		name, method, path, wantCache, wantCDN string
 		wantStatus                             int
 	}{
-		{name: "html", method: http.MethodGet, path: "/", wantStatus: http.StatusOK, wantCache: staticCacheControl, wantCDN: staticCDNCacheControl},
+		{name: "html", method: http.MethodGet, path: "/", wantStatus: http.StatusOK, wantCache: indexCacheControl, wantCDN: indexCDNCacheControl},
 		{name: "guide", method: http.MethodGet, path: "/help/mcp", wantStatus: http.StatusOK, wantCache: staticCacheControl, wantCDN: staticCDNCacheControl},
 		{name: "resource api path", method: http.MethodGet, path: "/api/v1/resources/1", wantStatus: http.StatusNotFound, wantCache: errorCacheControl, wantCDN: errorCDNCacheControl},
 		{name: "api", method: http.MethodGet, path: "/api/v1/articles?page=1", wantStatus: http.StatusOK, wantCache: apiCacheControl, wantCDN: apiCDNCacheControl},
@@ -248,6 +271,7 @@ func TestArticlePageHasResponsiveInfoAndAttachments(t *testing.T) {
 		`class="reading-bar"`, `来源：党委宣传部`, `时间：2026-08-30`, `阅读原文 ↗`,
 		`class="article-side"`, `class="side-resources"`, `通知.pdf`,
 		`@media (orientation:portrait)`, `@media(min-width:1100px) and (orientation:landscape)`,
+		`class="footer"`, `服务器于 `, ` 提供，耗时 `, ` ms`,
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("article page did not contain %q", fragment)
