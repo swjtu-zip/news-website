@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -223,13 +224,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	filter := articleFilter(r)
 	items, total, err := s.store.FindArticles(filter)
 	if err != nil {
+		log.Printf("archive index article query failed: %v", err)
 		http.Error(w, "archive query failed", http.StatusInternalServerError)
 		return
 	}
 	facets, err := s.store.SiteFacets()
 	if err != nil {
-		http.Error(w, "archive query failed", http.StatusInternalServerError)
-		return
+		log.Printf("archive index facet query failed: %v", err)
+		// The facet sidebar is auxiliary. Keep the article page usable during a
+		// short cross-process SQLite write collision even if its aggregate query
+		// still failed after the bounded retry window.
+		facets = nil
 	}
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Add("Vary", "Accept")

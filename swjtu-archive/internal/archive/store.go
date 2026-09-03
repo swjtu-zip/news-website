@@ -128,7 +128,10 @@ func Open(dbPath string) (*Store, error) {
 	}
 	for _, statement := range []string{
 		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 5000",
+		// The sync command runs in a separate container against the same WAL
+		// database. A write can briefly outlive the default five-second wait
+		// while the web process is reading a page.
+		"PRAGMA busy_timeout = 30000",
 		"PRAGMA journal_mode = WAL",
 	} {
 		if _, err := db.Exec(statement); err != nil {
@@ -326,20 +329,37 @@ func (s *Store) UpsertArticle(input ArticleInput) (int64, error) {
 	if title == "" {
 		title = input.Item.Title
 	}
-	date := input.Article.Date
-	if date == "" {
-		date = input.Item.Date
+	articlePublishedAt := normalizePublishedAt(input.Article.PublishedAt)
+	listingPublishedAt := normalizePublishedAt(input.Item.PublishedAt)
+	articleDate := normalizeDate(input.Article.Date)
+	if articleDate == "" {
+		articleDate = normalizeDate(articlePublishedAt)
 	}
-	publishedAt := input.Article.PublishedAt
+	listingDate := normalizeDate(input.Item.Date)
+	date := articleDate
+	if date == "" {
+		date = listingDate
+	}
+	publishedAt := articlePublishedAt
 	if publishedAt == "" {
-		publishedAt = input.Item.PublishedAt
+		publishedAt = listingPublishedAt
 	}
 	if publishedAt == "" {
 		publishedAt = date
 	}
-	publishedAt = normalizePublishedAt(publishedAt)
+	// A detail body can mention a deadline or a forwarded source's date. When
+	// its publication day disagrees with the date shown on the article list,
+	// use the list's date as the safer publication signal while retaining the
+	// detail's precise clock when both sources agree on the day.
+	if listingDate != "" && articleDate != "" && listingDate != articleDate {
+		date = listingDate
+		publishedAt = listingPublishedAt
+		if publishedAt == "" {
+			publishedAt = listingDate
+		}
+	}
 	if date == "" {
-		date = publishedAt
+		date = normalizeDate(publishedAt)
 	}
 	date = normalizeDate(date)
 	articleType := strings.TrimSpace(input.Article.Type)
@@ -452,12 +472,18 @@ FROM articles WHERE canonical_url = ?`, canonicalURL).Scan(
 		feedID = feed.ID
 	}
 
-	publishedAt := existing.publishedAt
 	incomingPublishedAt := normalizePublishedAt(item.PublishedAt)
 	if incomingPublishedAt == "" {
 		incomingPublishedAt = normalizePublishedAt(item.Date)
 	}
-	if publishedAt == "" || (hasPublishedTime(incomingPublishedAt) && !hasPublishedTime(publishedAt)) {
+	publishedAt := existing.publishedAt
+	incomingDate := normalizeDate(item.Date)
+	existingDate := normalizeDate(existing.publishedAt)
+	if incomingDate != "" && existingDate != "" && incomingDate != existingDate {
+		// A listing date is less likely to be an event/deadline mentioned in the
+		// detail body. Correct an already archived conflicting date from it.
+		publishedAt = incomingPublishedAt
+	} else if publishedAt == "" || (hasPublishedTime(incomingPublishedAt) && !hasPublishedTime(publishedAt)) {
 		publishedAt = incomingPublishedAt
 	}
 
@@ -634,31 +660,59 @@ func (s *Store) FindArticles(filter ArticleFilter) ([]ArticleSummary, int, error
 	where, args, join := articleWhere(filter)
 	var total int
 	countQuery := "SELECT COUNT(*) FROM articles a " + join + " WHERE " + where
-	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+	if err := retrySQLiteBusy(func() error {
+		return s.db.QueryRow(countQuery, args...).Scan(&total)
+	}); err != nil {
 		return nil, 0, fmt.Errorf("count articles: %w", err)
 	}
 	query := `SELECT a.id, a.title, a.source, a.site_id, a.site_name, a.feed_id, a.category, a.article_type,
 a.published_at, a.canonical_url, a.author, a.fetch_status FROM articles a ` + join + ` WHERE ` + where +
 		` ORDER BY CASE WHEN a.published_at = '' THEN 1 ELSE 0 END, a.published_at DESC, a.id DESC LIMIT ? OFFSET ?`
 	args = append(args, filter.PageSize, (filter.Page-1)*filter.PageSize)
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
+	var result []ArticleSummary
+	if err := retrySQLiteBusy(func() error {
+		result = result[:0]
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item ArticleSummary
+			if err := rows.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
+				&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status); err != nil {
+				return err
+			}
+			result = append(result, item)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, 0, fmt.Errorf("query articles: %w", err)
 	}
-	defer rows.Close()
-	var result []ArticleSummary
-	for rows.Next() {
-		var item ArticleSummary
-		if err := rows.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
-			&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status); err != nil {
-			return nil, 0, err
-		}
-		result = append(result, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
 	return result, total, nil
+}
+
+// retrySQLiteBusy tolerates a short writer/readers collision between the web
+// process and the one-shot sync container, which use the same WAL database.
+func retrySQLiteBusy(operation func() error) error {
+	const attempts = 3
+	for attempt := 0; attempt < attempts; attempt++ {
+		err := operation()
+		if err == nil || !isSQLiteBusy(err) || attempt == attempts-1 {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+	}
+	return nil
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "locked") || strings.Contains(text, "sqlite_busy") ||
+		(strings.Contains(text, "busy") && strings.Contains(text, "database"))
 }
 
 func articleWhere(filter ArticleFilter) (string, []any, string) {
@@ -731,34 +785,45 @@ type ArticleRecord struct {
 }
 
 func (s *Store) GetArticle(id int64) (*ArticleRecord, error) {
-	row := s.db.QueryRow(`SELECT id, title, source, site_id, site_name, feed_id, category, article_type, published_at,
+	item := &ArticleRecord{}
+	err := retrySQLiteBusy(func() error {
+		row := s.db.QueryRow(`SELECT id, title, source, site_id, site_name, feed_id, category, article_type, published_at,
 canonical_url, author, fetch_status, content, content_html, raw_path, raw_sha256, photographer, editor,
 first_seen_at, last_seen_at, last_fetched_at, last_error FROM articles WHERE id=?`, id)
-	item := &ArticleRecord{}
-	err := row.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
-		&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status, &item.Content,
-		&item.ContentHTML, &item.RawPath, &item.RawSHA256, &item.Photographer, &item.Editor,
-		&item.FirstSeenAt, &item.LastSeenAt, &item.LastFetchedAt, &item.LastError)
+		return row.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
+			&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status, &item.Content,
+			&item.ContentHTML, &item.RawPath, &item.RawSHA256, &item.Photographer, &item.Editor,
+			&item.FirstSeenAt, &item.LastSeenAt, &item.LastFetchedAt, &item.LastError)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, os.ErrNotExist
 	}
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT id, article_id, kind, original_url, local_path, filename, content_type,
+	var resources []ResourceRecord
+	err = retrySQLiteBusy(func() error {
+		resources = resources[:0]
+		rows, err := s.db.Query(`SELECT id, article_id, kind, original_url, local_path, filename, content_type,
 byte_size, sha256, status, error FROM resources WHERE article_id=? ORDER BY id`, id)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			resource, err := scanResource(rows)
+			if err != nil {
+				return err
+			}
+			resources = append(resources, *resource)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		resource, err := scanResource(rows)
-		if err != nil {
-			return nil, err
-		}
-		item.Resources = append(item.Resources, *resource)
-	}
-	return item, rows.Err()
+	item.Resources = resources
+	return item, nil
 }
 
 func scanResource(scanner interface{ Scan(...any) error }) (*ResourceRecord, error) {
@@ -769,9 +834,18 @@ func scanResource(scanner interface{ Scan(...any) error }) (*ResourceRecord, err
 }
 
 func (s *Store) Resource(id int64) (*ResourceRecord, error) {
-	row := s.db.QueryRow(`SELECT id, article_id, kind, original_url, local_path, filename, content_type,
+	var item *ResourceRecord
+	err := retrySQLiteBusy(func() error {
+		row := s.db.QueryRow(`SELECT id, article_id, kind, original_url, local_path, filename, content_type,
 byte_size, sha256, status, error FROM resources WHERE id=?`, id)
-	return scanResource(row)
+		var err error
+		item, err = scanResource(row)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return item, nil
 }
 
 // OpenResource opens a successfully archived resource after validating its
@@ -856,11 +930,13 @@ func (s *Store) releaseRunLock() {
 }
 
 func (s *Store) LatestRun() (*RunRecord, error) {
-	row := s.db.QueryRow(`SELECT id, started_at, finished_at, status, feeds, articles, resources, failures, error
-FROM sync_runs ORDER BY id DESC LIMIT 1`)
 	item := &RunRecord{}
-	err := row.Scan(&item.ID, &item.StartedAt, &item.FinishedAt, &item.Status, &item.Feeds, &item.Articles,
-		&item.Resources, &item.Failures, &item.Error)
+	err := retrySQLiteBusy(func() error {
+		row := s.db.QueryRow(`SELECT id, started_at, finished_at, status, feeds, articles, resources, failures, error
+FROM sync_runs ORDER BY id DESC LIMIT 1`)
+		return row.Scan(&item.ID, &item.StartedAt, &item.FinishedAt, &item.Status, &item.Feeds, &item.Articles,
+			&item.Resources, &item.Failures, &item.Error)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -875,13 +951,19 @@ type Stats struct {
 
 func (s *Store) Stats() (Stats, error) {
 	var stats Stats
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM articles").Scan(&stats.Articles); err != nil {
+	if err := retrySQLiteBusy(func() error {
+		return s.db.QueryRow("SELECT COUNT(*) FROM articles").Scan(&stats.Articles)
+	}); err != nil {
 		return Stats{}, err
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM resources WHERE status='success'").Scan(&stats.Resources); err != nil {
+	if err := retrySQLiteBusy(func() error {
+		return s.db.QueryRow("SELECT COUNT(*) FROM resources WHERE status='success'").Scan(&stats.Resources)
+	}); err != nil {
 		return Stats{}, err
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM feeds").Scan(&stats.Feeds); err != nil {
+	if err := retrySQLiteBusy(func() error {
+		return s.db.QueryRow("SELECT COUNT(*) FROM feeds").Scan(&stats.Feeds)
+	}); err != nil {
 		return Stats{}, err
 	}
 	return stats, nil
@@ -896,21 +978,25 @@ type SiteFacet struct {
 
 // SiteFacets returns article counts grouped by source site, most articles first.
 func (s *Store) SiteFacets() ([]SiteFacet, error) {
-	rows, err := s.db.Query(`SELECT site_id, site_name, COUNT(*) FROM articles
-GROUP BY site_id, site_name ORDER BY COUNT(*) DESC, site_id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var facets []SiteFacet
-	for rows.Next() {
-		var facet SiteFacet
-		if err := rows.Scan(&facet.SiteID, &facet.SiteName, &facet.Count); err != nil {
-			return nil, err
+	err := retrySQLiteBusy(func() error {
+		facets = facets[:0]
+		rows, err := s.db.Query(`SELECT site_id, site_name, COUNT(*) FROM articles
+GROUP BY site_id, site_name ORDER BY COUNT(*) DESC, site_id`)
+		if err != nil {
+			return err
 		}
-		facets = append(facets, facet)
-	}
-	return facets, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var facet SiteFacet
+			if err := rows.Scan(&facet.SiteID, &facet.SiteName, &facet.Count); err != nil {
+				return err
+			}
+			facets = append(facets, facet)
+		}
+		return rows.Err()
+	})
+	return facets, err
 }
 
 var dateFormats = []string{"2006-01-02", "2006/01/02", "2006.01.02", "2006年01月02日", "2006-1-2", "2006/1/2", "2006年1月2日", "2006.1.2"}

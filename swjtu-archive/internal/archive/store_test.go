@@ -2,6 +2,7 @@ package archive
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -9,6 +10,38 @@ import (
 
 	"swjtu-cli/pkg/sdk"
 )
+
+func TestRetrySQLiteBusyRetriesTransientLock(t *testing.T) {
+	attempts := 0
+	err := retrySQLiteBusy(func() error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("database table is locked")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestRetrySQLiteBusyDoesNotRetryOtherErrors(t *testing.T) {
+	attempts := 0
+	want := errors.New("syntax error")
+	err := retrySQLiteBusy(func() error {
+		attempts++
+		return want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want %v", err, want)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
 
 func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 	store, err := Open(t.TempDir() + "/archive.db")
@@ -73,6 +106,47 @@ func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 	body, err := io.ReadAll(file)
 	if err != nil || string(body) != "image-data" {
 		t.Fatalf("unexpected stored resource: %q (%v)", body, err)
+	}
+}
+
+func TestPublicationDateUsesListingDayWhenDetailConflicts(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	feed := sdk.Feed{ID: "xinli:tzgg/gsgg", SiteID: "xinli", SiteName: "心理研究与咨询中心", Category: "college", Slug: "tzgg/gsgg", Name: "公示公告", BaseURL: "http://xinli.swjtu.edu.cn"}
+	item := sdk.NewsItem{Title: "转发公告", URL: "http://xinli.swjtu.edu.cn/info/1572/45166.htm", Date: "2025-10-08"}
+	id, err := store.UpsertArticle(ArticleInput{
+		Feed: feed, Item: item, FetchedAt: time.Now(),
+		Article: &sdk.Article{Title: item.Title, Date: "2025-10-10", PublishedAt: "2025-10-10 17:30:00", Content: "正文"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	article, err := store.GetArticle(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if article.PublishedAt != "2025-10-08" {
+		t.Fatalf("conflicting detail date was retained: %q", article.PublishedAt)
+	}
+
+	// The same guard must repair an existing row when a fresh listing observes
+	// it again without requiring another detail fetch.
+	if _, err := store.db.Exec("UPDATE articles SET published_at='2025-10-10 17:30:00' WHERE id=?", id); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TouchArticleMetadata(item.URL, feed, item, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	article, err = store.GetArticle(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if article.PublishedAt != "2025-10-08" {
+		t.Fatalf("conflicting existing date was not repaired: %q", article.PublishedAt)
 	}
 }
 

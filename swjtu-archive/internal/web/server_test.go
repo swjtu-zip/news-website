@@ -135,9 +135,10 @@ func TestIndexIncludesMCPGuideAndPageJump(t *testing.T) {
 		}
 	}
 
+	handler := NewServer(store).Handler()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/?page_size=1&site=news", nil)
-	NewServer(store).Handler().ServeHTTP(recorder, request)
+	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body.String())
 	}
@@ -148,6 +149,15 @@ func TestIndexIncludesMCPGuideAndPageJump(t *testing.T) {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("index did not contain %q", fragment)
 		}
+	}
+
+	// A site filter and a large but syntactically valid page number should
+	// return an empty result page, not an archive query failure.
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/?site=dqxy&page=1839", nil)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("filtered high page returned %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
