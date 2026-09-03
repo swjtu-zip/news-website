@@ -76,6 +76,70 @@ func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 	}
 }
 
+func TestOpenCleansLegacyDatesAndImpossibleResources(t *testing.T) {
+	dbPath := t.TempDir() + "/archive.db"
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feed := sdk.Feed{ID: "rwxy:xyxw", SiteID: "rwxy", SiteName: "人文学院", Category: "college", Slug: "xyxw", Name: "学院新闻", BaseURL: "http://rwxy.swjtu.edu.cn"}
+	articleID, err := store.UpsertArticle(ArticleInput{
+		Feed:      feed,
+		Item:      sdk.NewsItem{Title: "迁移清理测试", URL: "http://rwxy.swjtu.edu.cn/info/1/1.htm"},
+		Article:   &sdk.Article{Title: "迁移清理测试", PublishedAt: "2013-01-01 00:00:00", Content: "正文"},
+		FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec("UPDATE articles SET published_at='2013-01-01 00:00:00' WHERE id=?", articleID); err != nil {
+		t.Fatal(err)
+	}
+	for _, rawURL := range []string{
+		"data:image/png;base64,placeholder",
+		"file:///tmp/old.doc",
+		"mailto:test@example.com",
+		"https://rwxy.swjtu.edu.cn/doc.gif",
+		"https://dqxy.swjtu.edu.cn/_mediafile/%7Bownername%7D/broken.png",
+	} {
+		if _, err := store.UpsertResource(ResourceInput{ArticleID: articleID, Kind: "image", OriginalURL: rawURL, Status: "failed", Error: "legacy", UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.UpsertResource(ResourceInput{ArticleID: articleID, Kind: "image", OriginalURL: "https://rwxy.swjtu.edu.cn/real.png", Status: "failed", Error: "404", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertResource(ResourceInput{ArticleID: articleID, Kind: "image", OriginalURL: "https://rwxy.swjtu.edu.cn/doc.gif", LocalPath: "assets/keep", Status: "success", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var published string
+	if err := store.db.QueryRow("SELECT published_at FROM articles WHERE id=?", articleID).Scan(&published); err != nil {
+		t.Fatal(err)
+	}
+	if published != "" {
+		t.Fatalf("legacy publication date = %q, want empty", published)
+	}
+	var failed, successful int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM resources WHERE article_id=? AND status='failed'", articleID).Scan(&failed); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM resources WHERE article_id=? AND status='success'", articleID).Scan(&successful); err != nil {
+		t.Fatal(err)
+	}
+	if failed != 1 || successful != 1 {
+		t.Fatalf("legacy resources after cleanup = failed %d, successful %d; want 1/1", failed, successful)
+	}
+}
+
 func TestTouchArticleMetadataUpgradesLegacyListing(t *testing.T) {
 	store, err := Open(t.TempDir() + "/archive.db")
 	if err != nil {

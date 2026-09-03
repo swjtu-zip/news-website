@@ -144,6 +144,14 @@ func Open(dbPath string) (*Store, error) {
 		store.Close()
 		return nil, fmt.Errorf("migrate article type: %w", err)
 	}
+	if err := normalizeLegacyPublicationDates(db); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("migrate legacy publication dates: %w", err)
+	}
+	if err := removeLegacyInvalidResources(db); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("migrate legacy resources: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Join(dataDir, "tmp"), 0o755); err != nil {
 		store.Close()
 		return nil, fmt.Errorf("create temporary directory: %w", err)
@@ -168,6 +176,44 @@ func ensureArticleTypeColumn(db *sql.DB) error {
 		return nil
 	}
 	_, err := db.Exec(`ALTER TABLE articles ADD COLUMN article_type TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// normalizeLegacyPublicationDates clears values known to have been emitted
+// by migration templates rather than by the source article.  The adapters
+// reject these values for new fetches, but old rows can be inside the 24-hour
+// freshness window (or outside the current backfill range) and would
+// otherwise keep exposing a fabricated publication date forever.
+func normalizeLegacyPublicationDates(db *sql.DB) error {
+	_, err := db.Exec(`UPDATE articles SET published_at=''
+WHERE (site_id='rwxy' AND substr(published_at, 1, 10)='2013-01-01')
+   OR (site_id='phys' AND substr(published_at, 1, 10)='2017-04-24')`)
+	return err
+}
+
+// removeLegacyInvalidResources removes only failed rows that can never be
+// downloaded.  They were produced by older parsers for data/file/mailto
+// pseudo-links, CMS template placeholders, or presentation GIFs.  Successful
+// rows are deliberately retained, as are real HTTP(S) failures which still
+// describe an unavailable source asset and may be retried later.
+func removeLegacyInvalidResources(db *sql.DB) error {
+	_, err := db.Exec(`DELETE FROM resources
+WHERE status='failed' AND (
+    lower(original_url) LIKE 'data:%'
+ OR lower(original_url) LIKE 'file:%'
+ OR lower(original_url) LIKE 'mailto:%'
+ OR lower(original_url) LIKE 'javascript:%'
+ OR lower(original_url) LIKE 'blob:%'
+ OR lower(original_url) LIKE '%${ownername}%'
+ OR lower(original_url) LIKE '%7bownername%7d%'
+ OR lower(original_url) LIKE '%/system/resource/images/filetypeimages/%'
+ OR lower(original_url) LIKE '%/doc.gif'
+ OR lower(original_url) LIKE '%/pdf.gif'
+ OR lower(original_url) LIKE '%/rar.gif'
+ OR lower(original_url) LIKE '%/spacer.gif'
+ OR lower(original_url) LIKE '%/blank.gif'
+ OR lower(original_url) LIKE '%/transparent.gif'
+)`)
 	return err
 }
 
