@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -230,6 +231,29 @@ func TestStartRunUsesProcessLock(t *testing.T) {
 	}
 	if _, err := second.StartRun(time.Now()); err != nil {
 		t.Fatalf("sync lock was not released: %v", err)
+	}
+}
+
+func TestStartRunClosesOrphanedRuns(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.db.Exec(`INSERT INTO sync_runs (started_at, status) VALUES (?, 'running')`, "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := store.StartRun(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.FinishRun(runID, "canceled", 0, 0, 0, 0, context.Canceled, time.Now())
+	var status, finishedAt, runError string
+	if err := store.db.QueryRow("SELECT status, finished_at, error FROM sync_runs WHERE id=1").Scan(&status, &finishedAt, &runError); err != nil {
+		t.Fatal(err)
+	}
+	if status != "canceled" || finishedAt == "" || runError == "" {
+		t.Fatalf("orphaned run was not finalized: status=%q finished_at=%q error=%q", status, finishedAt, runError)
 	}
 }
 

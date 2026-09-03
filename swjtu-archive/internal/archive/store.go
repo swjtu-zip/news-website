@@ -767,7 +767,19 @@ func (s *Store) StartRun(now time.Time) (int64, error) {
 		}
 		return 0, fmt.Errorf("acquire sync lock: %w", err)
 	}
-	result, err := s.db.Exec("INSERT INTO sync_runs (started_at, status) VALUES (?, 'running')", now.UTC().Format(time.RFC3339Nano))
+	nowText := now.UTC().Format(time.RFC3339Nano)
+	// A process can be terminated after acquiring the lock but before its
+	// deferred cleanup runs. Once this process owns the lock, any older running
+	// row is necessarily orphaned; close it before recording the new run so the
+	// status API never presents a dead crawl as active indefinitely.
+	if _, err := s.db.Exec(`UPDATE sync_runs
+SET finished_at=?, status='canceled', error='previous process did not finalize the run'
+WHERE status='running' AND started_at < ?`, nowText, nowText); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return 0, fmt.Errorf("close orphaned sync runs: %w", err)
+	}
+	result, err := s.db.Exec("INSERT INTO sync_runs (started_at, status) VALUES (?, 'running')", nowText)
 	if err != nil {
 		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
