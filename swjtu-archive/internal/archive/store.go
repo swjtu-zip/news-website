@@ -665,10 +665,23 @@ func (s *Store) FindArticles(filter ArticleFilter) ([]ArticleSummary, int, error
 	}); err != nil {
 		return nil, 0, fmt.Errorf("count articles: %w", err)
 	}
+	// Avoid passing a large OFFSET to the SQLite driver. Besides doing more
+	// work than necessary, the modernc driver can return SQLITE_IOERR on this
+	// database once a filtered result set is skipped past a B-tree boundary.
+	// The count query already gives us a cheap, deterministic out-of-range
+	// check; an empty page is the correct result when the requested offset is
+	// beyond the filtered set.
+	offset := 0
+	if total == 0 || filter.Page > (total-1)/filter.PageSize+1 {
+		return []ArticleSummary{}, total, nil
+	}
+	offset = (filter.Page - 1) * filter.PageSize
 	query := `SELECT a.id, a.title, a.source, a.site_id, a.site_name, a.feed_id, a.category, a.article_type,
 a.published_at, a.canonical_url, a.author, a.fetch_status FROM articles a ` + join + ` WHERE ` + where +
-		` ORDER BY CASE WHEN a.published_at = '' THEN 1 ELSE 0 END, a.published_at DESC, a.id DESC LIMIT ? OFFSET ?`
-	args = append(args, filter.PageSize, (filter.Page-1)*filter.PageSize)
+		` ORDER BY CASE WHEN a.published_at = '' THEN 1 ELSE 0 END, a.published_at DESC, a.id DESC LIMIT ?`
+	// LIMIT is bounded by total and keeps the driver on the stable sequential
+	// scan path. Only the requested page is retained below.
+	args = append(args, offset+filter.PageSize)
 	var result []ArticleSummary
 	if err := retrySQLiteBusy(func() error {
 		result = result[:0]
@@ -677,11 +690,16 @@ a.published_at, a.canonical_url, a.author, a.fetch_status FROM articles a ` + jo
 			return err
 		}
 		defer rows.Close()
+		skipped := 0
 		for rows.Next() {
 			var item ArticleSummary
 			if err := rows.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
 				&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status); err != nil {
 				return err
+			}
+			if skipped < offset {
+				skipped++
+				continue
 			}
 			result = append(result, item)
 		}
