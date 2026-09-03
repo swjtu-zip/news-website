@@ -356,6 +356,18 @@ func (s *Store) TouchArticle(canonicalURL string, now time.Time) error {
 	return err
 }
 
+// NormalizeRunSeenAt gives every article observed by one completed crawl the
+// same end timestamp.  last_seen_at describes observation by the listing
+// crawl (not necessarily a detail fetch), so last_fetched_at is intentionally
+// left unchanged for articles that were served from the freshness window.
+func (s *Store) NormalizeRunSeenAt(started, finished time.Time) error {
+	startText := started.UTC().Format(time.RFC3339Nano)
+	finishText := finished.UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`UPDATE articles SET last_seen_at=?
+WHERE last_seen_at >= ? AND last_seen_at <= ?`, finishText, startText, finishText)
+	return err
+}
+
 // TouchArticleMetadata refreshes fields that are available from a listing
 // without downloading the detail page again. This matters when a new adapter
 // exposes a more specific tab/feed for an article that was already fetched by
@@ -496,6 +508,41 @@ sha256=excluded.sha256, status=excluded.status, error=excluded.error, updated_at
 	err = s.db.QueryRow(`SELECT id FROM resources WHERE article_id = ? AND kind = ? AND original_url = ?`,
 		input.ArticleID, input.Kind, input.OriginalURL).Scan(&id)
 	return id, err
+}
+
+// RemoveStaleFailedResources drops only failed resource rows that are no
+// longer present in a successfully parsed article snapshot.  Older adapter
+// versions can leave a failed URL behind after a canonical-host correction
+// (for example ic.swjtu.edu.cn -> sic.swjtu.edu.cn); retaining that obsolete
+// row makes a repaired article appear broken through the API. Successful
+// resources are never removed by this reconciliation.
+func (s *Store) RemoveStaleFailedResources(articleID int64, currentURLs map[string]bool) error {
+	rows, err := s.db.Query(`SELECT id, original_url FROM resources
+WHERE article_id=? AND status='failed' AND local_path=''`, articleID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var staleIDs []int64
+	for rows.Next() {
+		var id int64
+		var originalURL string
+		if err := rows.Scan(&id, &originalURL); err != nil {
+			return err
+		}
+		if !currentURLs[originalURL] {
+			staleIDs = append(staleIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range staleIDs {
+		if _, err := s.db.Exec("DELETE FROM resources WHERE id=? AND status='failed'", id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ExistingResource(articleID int64, kind, originalURL string) (*ResourceRecord, error) {

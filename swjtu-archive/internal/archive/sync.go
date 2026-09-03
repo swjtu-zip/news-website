@@ -132,7 +132,16 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 			runErr = fmt.Errorf("%d failures; first: %s", result.Failures, result.Errors[0])
 		}
 	}
-	if err := s.store.FinishRun(runID, status, result.Feeds, result.Articles, result.Resources, result.Failures, runErr, time.Now()); err != nil {
+	finished := time.Now()
+	if err := s.store.NormalizeRunSeenAt(started, finished); err != nil {
+		result.Failures++
+		result.Errors = append(result.Errors, fmt.Sprintf("统一采集结束时间: %v", err))
+		if runErr == nil {
+			runErr = err
+		}
+		status = "partial"
+	}
+	if err := s.store.FinishRun(runID, status, result.Feeds, result.Articles, result.Resources, result.Failures, runErr, finished); err != nil {
 		return result, err
 	}
 	if s.opts.Logger != nil {
@@ -230,6 +239,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 		result.Articles++
 
 		seen := make(map[string]bool)
+		resourceErr := false
 		for _, resourceURL := range article.Images {
 			if seen[resourceURL] || resourceURL == "" {
 				continue
@@ -240,6 +250,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 				result.Resources++
 			}
 			if err != nil {
+				resourceErr = true
 				result.Failures++
 				result.Errors = append(result.Errors, fmt.Sprintf("图片 %s: %v", resourceURL, err))
 			}
@@ -254,8 +265,15 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 				result.Resources++
 			}
 			if err != nil {
+				resourceErr = true
 				result.Failures++
 				result.Errors = append(result.Errors, fmt.Sprintf("附件 %s: %v", attachment.Name, err))
+			}
+		}
+		if !resourceErr {
+			if err := s.store.RemoveStaleFailedResources(articleID, seen); err != nil {
+				result.Failures++
+				result.Errors = append(result.Errors, fmt.Sprintf("清理文章 %s 的旧资源记录: %v", item.URL, err))
 			}
 		}
 	}

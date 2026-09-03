@@ -120,6 +120,71 @@ func TestTouchArticleMetadataUpgradesLegacyListing(t *testing.T) {
 	}
 }
 
+func TestRemoveStaleFailedResourcesKeepsCurrentAndSuccessfulRows(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	feed := sdk.Feed{ID: "sic:xydt", SiteID: "sic", SiteName: "集成电路科学与工程学院", Category: "college", Slug: "xydt", Name: "学院动态", BaseURL: "https://sic.swjtu.edu.cn"}
+	item := sdk.NewsItem{Title: "附件修复测试", URL: "https://sic.swjtu.edu.cn/info/1/2.htm", Date: "2026-08-28"}
+	articleID, err := store.UpsertArticle(ArticleInput{Feed: feed, Item: item, FetchedAt: time.Now(), Article: &sdk.Article{Title: item.Title, Date: item.Date, Content: "正文"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rawURL := range []string{"https://ic.swjtu.edu.cn/__local/old.png", "https://sic.swjtu.edu.cn/__local/current.png"} {
+		if _, err := store.UpsertResource(ResourceInput{ArticleID: articleID, Kind: "image", OriginalURL: rawURL, Status: "failed", Error: "403", UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.UpsertResource(ResourceInput{ArticleID: articleID, Kind: "image", OriginalURL: "https://sic.swjtu.edu.cn/__local/kept.png", LocalPath: "assets/kept", Status: "success", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RemoveStaleFailedResources(articleID, map[string]bool{"https://sic.swjtu.edu.cn/__local/current.png": true}); err != nil {
+		t.Fatal(err)
+	}
+	full, err := store.GetArticle(articleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Resources) != 2 {
+		t.Fatalf("resources after reconciliation = %#v, want current failed plus successful row", full.Resources)
+	}
+	for _, resource := range full.Resources {
+		if resource.OriginalURL == "https://ic.swjtu.edu.cn/__local/old.png" {
+			t.Fatalf("stale failed resource was not removed: %#v", resource)
+		}
+	}
+}
+
+func TestNormalizeRunSeenAtUsesOneFinishedTimestamp(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	feed := sdk.Feed{ID: "news:test", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "test", Name: "测试", BaseURL: "https://news.swjtu.edu.cn"}
+	started := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+	finished := started.Add(2 * time.Hour)
+	item := sdk.NewsItem{Title: "结束时间测试", URL: "https://news.swjtu.edu.cn/info/1/99.htm", Date: "2026-09-03"}
+	if _, err := store.UpsertArticle(ArticleInput{Feed: feed, Item: item, FetchedAt: started.Add(time.Minute), Article: &sdk.Article{Title: item.Title, Date: item.Date}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NormalizeRunSeenAt(started, finished); err != nil {
+		t.Fatal(err)
+	}
+	full, err := store.GetArticle(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.LastSeenAt != finished.Format(time.RFC3339Nano) {
+		t.Fatalf("last_seen_at = %q, want %q", full.LastSeenAt, finished.Format(time.RFC3339Nano))
+	}
+}
+
 func TestPreferIncomingArticleTypeUpgradesRouteLabels(t *testing.T) {
 	feed := sdk.Feed{Slug: "xwtz/xyxw", Name: "xwtz/xyxw"}
 	cases := []struct {
