@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +24,16 @@ type SyncOptions struct {
 	RequestGap       time.Duration
 	RefreshAfter     time.Duration
 	MaxResourceBytes int64
+	ResourceUploader ResourceUploader
 	Logger           *log.Logger
+}
+
+// ResourceUploader receives a successfully archived local resource before it
+// is exposed as a successful resource record. Once the upload succeeds, the
+// local asset copy is removed; the content-addressed local_path remains in
+// SQLite so the public object-store URL can be derived deterministically.
+type ResourceUploader interface {
+	Upload(ctx context.Context, fullPath, localPath, contentType, filename, kind, storageClass string) error
 }
 
 // SyncResult reports work performed by one synchronization pass.
@@ -245,7 +256,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 				continue
 			}
 			seen[resourceURL] = true
-			downloaded, err := s.archiveResource(ctx, articleID, "image", resourceURL, "", item.URL)
+			downloaded, err := s.archiveResource(ctx, articleID, "image", resourceURL, "", item.URL, articlePublishedAt(article, item))
 			if downloaded {
 				result.Resources++
 			}
@@ -260,7 +271,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 				continue
 			}
 			seen[attachment.URL] = true
-			downloaded, err := s.archiveResource(ctx, articleID, "attachment", attachment.URL, attachment.Name, item.URL)
+			downloaded, err := s.archiveResource(ctx, articleID, "attachment", attachment.URL, attachment.Name, item.URL, articlePublishedAt(article, item))
 			if downloaded {
 				result.Resources++
 			}
@@ -280,13 +291,30 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 	return result, nil
 }
 
-func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, resourceURL, preferredName, referer string) (bool, error) {
+func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, resourceURL, preferredName, referer, publishedAt string) (bool, error) {
 	if !isDownloadableResourceURL(resourceURL) {
 		return false, nil
 	}
 	if existing, err := s.store.ExistingResource(articleID, kind, resourceURL); err == nil && existing.Status == "success" && existing.LocalPath != "" {
 		if file, openErr := s.store.OpenResource(existing); openErr == nil {
 			file.Close()
+			if s.opts.ResourceUploader != nil {
+				fullPath := filepath.Join(s.store.DataDir(), filepath.FromSlash(existing.LocalPath))
+				storageClass := resourceStorageClass(kind, publishedAt, time.Now())
+				if uploadErr := s.opts.ResourceUploader.Upload(ctx, fullPath, existing.LocalPath, existing.ContentType, safeFilename(existing.Filename), kind, storageClass); uploadErr != nil {
+					return false, fmt.Errorf("上传已有本地资源到对象存储: %w", uploadErr)
+				}
+				if removeErr := os.Remove(fullPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return false, fmt.Errorf("删除已有本地资源副本: %w", removeErr)
+				}
+			}
+			return false, nil
+		}
+		// With an object-store uploader enabled, a successful resource may
+		// intentionally have no local file: successful uploads are cleaned up
+		// immediately to keep the host disk bounded. local_path is retained as
+		// the deterministic object key, so do not redownload it on every refresh.
+		if s.opts.ResourceUploader != nil {
 			return false, nil
 		}
 	}
@@ -312,6 +340,18 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		}
 		localPath, hash, size, saveErr := s.store.SaveResourceBody(resource.Body, s.opts.MaxResourceBytes, filename, resource.ContentType)
 		resource.Body.Close()
+		if saveErr == nil && s.opts.ResourceUploader != nil {
+			storageClass := resourceStorageClass(kind, publishedAt, time.Now())
+			fullPath := filepath.Join(s.store.DataDir(), filepath.FromSlash(localPath))
+			if uploadErr := s.opts.ResourceUploader.Upload(ctx, fullPath, localPath, resource.ContentType, safeFilename(filename), kind, storageClass); uploadErr != nil {
+				saveErr = fmt.Errorf("上传资源到对象存储: %w", uploadErr)
+			} else if removeErr := os.Remove(fullPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				// The object is already durable remotely. Keep the resource
+				// record failed when cleanup itself fails so the operator can
+				// see that local storage is not yet reclaimable.
+				saveErr = fmt.Errorf("删除本地资源副本: %w", removeErr)
+			}
+		}
 		if saveErr == nil {
 			_, err = s.store.UpsertResource(ResourceInput{
 				ArticleID: articleID, Kind: kind, OriginalURL: resourceURL, LocalPath: localPath,
@@ -335,6 +375,27 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		Filename: safeFilename(preferredName), Status: "failed", Error: lastErr.Error(), UpdatedAt: time.Now(),
 	})
 	return false, lastErr
+}
+
+func articlePublishedAt(article *sdk.Article, item sdk.NewsItem) string {
+	if article != nil {
+		if value := strings.TrimSpace(article.PublishedAt); value != "" {
+			return value
+		}
+		if value := strings.TrimSpace(article.Date); value != "" {
+			return value
+		}
+	}
+	if value := strings.TrimSpace(item.PublishedAt); value != "" {
+		return value
+	}
+	return strings.TrimSpace(item.Date)
+}
+
+func resourceStorageClass(kind, publishedAt string, now time.Time) string {
+	// Every newly mirrored resource uses frequent-access storage. The storage
+	// class of an object already in R2 is deliberately not changed by syncs.
+	return "STANDARD"
 }
 
 func isDownloadableResourceURL(raw string) bool {

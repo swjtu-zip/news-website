@@ -11,17 +11,23 @@ import (
 
 // Config contains service, crawler and storage settings.
 type Config struct {
-	DataDir          string
-	Addr             string
-	Interval         time.Duration
-	SyncTimes        []string // daily trigger times "HH:MM" in Asia/Shanghai; overrides Interval when set
-	Backfill         time.Duration
-	MaxPages         int
-	SyncOnStart      bool
-	MaxConcurrent    int
-	RequestGap       time.Duration
-	RefreshAfter     time.Duration
-	MaxResourceBytes int64
+	DataDir           string
+	Addr              string
+	AssetBaseURL      string
+	R2Endpoint        string
+	R2Bucket          string
+	R2Prefix          string
+	R2AccessKeyID     string
+	R2SecretAccessKey string
+	Interval          time.Duration
+	SyncTimes         []string // daily trigger times "HH:MM" in Asia/Shanghai; overrides Interval when set
+	Backfill          time.Duration
+	MaxPages          int
+	SyncOnStart       bool
+	MaxConcurrent     int
+	RequestGap        time.Duration
+	RefreshAfter      time.Duration
+	MaxResourceBytes  int64
 }
 
 // Load reads configuration from environment variables.
@@ -66,19 +72,41 @@ func Load() (Config, error) {
 	if interval <= 0 || backfill <= 0 || maxPages <= 0 || maxConcurrent <= 0 || gap < 0 || maxBytes <= 0 {
 		return Config{}, fmt.Errorf("invalid non-positive crawler configuration")
 	}
+	r2Endpoint := env("SWJTU_ARCHIVE_R2_ENDPOINT", "")
+	r2Bucket := env("SWJTU_ARCHIVE_R2_BUCKET", "")
+	r2Prefix := env("SWJTU_ARCHIVE_R2_PREFIX", "news-assets")
+	r2AccessKeyID := env("SWJTU_ARCHIVE_R2_ACCESS_KEY_ID", "")
+	r2SecretAccessKey := env("SWJTU_ARCHIVE_R2_SECRET_ACCESS_KEY", "")
+	r2Configured := r2Endpoint != "" || r2Bucket != "" || r2AccessKeyID != "" || r2SecretAccessKey != ""
+	r2Complete := r2Endpoint != "" && r2Bucket != "" && r2AccessKeyID != "" && r2SecretAccessKey != ""
+	if r2Configured && !r2Complete {
+		return Config{}, fmt.Errorf("R2 configuration is incomplete")
+	}
 	return Config{
-		DataDir:          dataDir,
-		Addr:             env("SWJTU_ARCHIVE_ADDR", ":8080"),
-		Interval:         interval,
-		SyncTimes:        syncTimes,
-		Backfill:         backfill,
-		MaxPages:         maxPages,
-		SyncOnStart:      syncOnStart,
-		MaxConcurrent:    maxConcurrent,
-		RequestGap:       gap,
-		RefreshAfter:     refreshAfter,
-		MaxResourceBytes: maxBytes,
+		DataDir:           dataDir,
+		Addr:              env("SWJTU_ARCHIVE_ADDR", ":8080"),
+		AssetBaseURL:      strings.TrimRight(env("SWJTU_ARCHIVE_ASSET_BASE_URL", ""), "/"),
+		R2Endpoint:        r2Endpoint,
+		R2Bucket:          r2Bucket,
+		R2Prefix:          r2Prefix,
+		R2AccessKeyID:     r2AccessKeyID,
+		R2SecretAccessKey: r2SecretAccessKey,
+		Interval:          interval,
+		SyncTimes:         syncTimes,
+		Backfill:          backfill,
+		MaxPages:          maxPages,
+		SyncOnStart:       syncOnStart,
+		MaxConcurrent:     maxConcurrent,
+		RequestGap:        gap,
+		RefreshAfter:      refreshAfter,
+		MaxResourceBytes:  maxBytes,
 	}, nil
+}
+
+// R2Enabled reports whether the service should mirror newly downloaded
+// resources to the configured object store.
+func (c Config) R2Enabled() bool {
+	return c.R2Endpoint != "" && c.R2Bucket != "" && c.R2AccessKeyID != "" && c.R2SecretAccessKey != ""
 }
 
 // timesEnv parses a comma-separated list of daily trigger times ("12:00,18:00").

@@ -43,6 +43,23 @@ func TestRetrySQLiteBusyDoesNotRetryOtherErrors(t *testing.T) {
 	}
 }
 
+func TestRetrySQLiteBusyRetriesTransientIOError(t *testing.T) {
+	attempts := 0
+	err := retrySQLiteBusy(func() error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("disk I/O error (6410)")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
 func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 	store, err := Open(t.TempDir() + "/archive.db")
 	if err != nil {

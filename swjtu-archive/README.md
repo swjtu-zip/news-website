@@ -21,6 +21,14 @@ go run ./cmd/swjtu-archive
 | `SWJTU_ARCHIVE_MAX_PAGES` | `1000` | 每个 feed 最多抓取页数 |
 | `SWJTU_ARCHIVE_REFRESH_AFTER` | `24h` | 文章详情与资源的刷新间隔 |
 | `SWJTU_ARCHIVE_SYNC_ON_START` | `true` | 是否启动时同步 |
+| `SWJTU_ARCHIVE_ASSET_BASE_URL` | 空 | 资源公网基地址，例如 `https://oss.swjtu.zip/news-assets` |
+| `SWJTU_ARCHIVE_R2_ENDPOINT` | 空 | R2 S3 账号端点（不含 bucket 路径） |
+| `SWJTU_ARCHIVE_R2_BUCKET` | 空 | R2 bucket 名称 |
+| `SWJTU_ARCHIVE_R2_PREFIX` | `news-assets` | R2 对象前缀 |
+| `SWJTU_ARCHIVE_R2_ACCESS_KEY_ID` | 空 | R2 S3 访问密钥 ID；与 secret 一起设置才启用上传 |
+| `SWJTU_ARCHIVE_R2_SECRET_ACCESS_KEY` | 空 | R2 S3 机密访问密钥 |
+
+启用 R2 后，新下载的资源会先写入本地临时归档并上传到对象存储，上传成功后删除本地 `assets` 副本，才记为成功资源；新上传资源统一使用 `STANDARD`。历史资源可用 `go run ./cmd/r2sync` 进行可恢复迁移，已存在对象（包括原先的 `STANDARD_IA` 对象）会被跳过，不会改动存储类别。确认迁移完成后可加 `--delete-local`，工具只会在 R2 对象已存在或本次上传成功后删除对应本地文件。
 
 ## 访问
 

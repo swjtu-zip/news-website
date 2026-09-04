@@ -39,7 +39,7 @@ func TestArticleAPIRewritesArchivedResources(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/articles/1", nil)
-	NewServer(store).Handler().ServeHTTP(recorder, request)
+	NewServer(store, "https://oss.swjtu.zip/news-assets").Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body.String())
 	}
@@ -50,6 +50,17 @@ func TestArticleAPIRewritesArchivedResources(t *testing.T) {
 	content, _ := response["content_html"].(string)
 	if content == "" || content == `<p>正文</p><img src="https://news.swjtu.edu.cn/image.png">` || strings.Contains(content, "script") || strings.Contains(content, "javascript:") {
 		t.Fatalf("resource URL was not rewritten: %q", content)
+	}
+	if !strings.Contains(content, "https://oss.swjtu.zip/news-assets/") {
+		t.Fatalf("resource URL did not use public object storage: %q", content)
+	}
+	resources, _ := response["resources"].([]any)
+	if len(resources) != 1 {
+		t.Fatalf("resources = %#v", response["resources"])
+	}
+	resource, _ := resources[0].(map[string]any)
+	if !strings.HasPrefix(resource["url"].(string), "https://oss.swjtu.zip/news-assets/") {
+		t.Fatalf("resource API URL = %#v", resource["url"])
 	}
 }
 

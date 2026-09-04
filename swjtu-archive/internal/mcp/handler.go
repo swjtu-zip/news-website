@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"swjtu-archive/internal/archive"
+	"swjtu-archive/internal/r2"
 	"swjtu-cli/pkg/sdk"
 )
 
@@ -43,11 +44,18 @@ var legacyProtocolVersions = map[string]bool{
 
 // Handler is a stateless Streamable HTTP MCP server backed by the archive.
 type Handler struct {
-	store *archive.Store
+	store        *archive.Store
+	assetBaseURL string
 }
 
 // NewHandler creates a read-only MCP handler.
-func NewHandler(store *archive.Store) *Handler { return &Handler{store: store} }
+func NewHandler(store *archive.Store, assetBaseURLs ...string) *Handler {
+	assetBaseURL := ""
+	if len(assetBaseURLs) > 0 {
+		assetBaseURL = strings.TrimRight(strings.TrimSpace(assetBaseURLs[0]), "/")
+	}
+	return &Handler{store: store, assetBaseURL: assetBaseURL}
+}
 
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -477,7 +485,7 @@ func (h *Handler) callTool(r *http.Request, params json.RawMessage) map[string]a
 			}
 			return toolError("读取文章失败：" + err.Error())
 		}
-		return articleToolResult(item, requestBase(r))
+		return articleToolResult(item, requestBase(r), h.assetBaseURL)
 	case "download_resource":
 		var args struct {
 			ID int64 `json:"id"`
@@ -497,7 +505,7 @@ func (h *Handler) callTool(r *http.Request, params json.RawMessage) map[string]a
 			return toolError("资源文件不存在")
 		}
 		_ = file.Close()
-		return resourceToolResult(item, requestBase(r))
+		return resourceToolResult(item, requestBase(r), h.assetBaseURL)
 	default:
 		return toolError("未知工具：" + call.Name)
 	}
@@ -565,12 +573,12 @@ func toolError(message string) map[string]any {
 	}
 }
 
-func articleToolResult(item *archive.ArticleRecord, base string) map[string]any {
+func articleToolResult(item *archive.ArticleRecord, base, assetBaseURL string) map[string]any {
 	resources := make([]map[string]any, 0, len(item.Resources))
-	content := []any{map[string]any{"type": "text", "text": articleMarkdown(item, base)}}
+	content := []any{map[string]any{"type": "text", "text": articleMarkdown(item, base, assetBaseURL)}}
 	for i := range item.Resources {
 		resource := &item.Resources[i]
-		entry := resourceMetadata(resource, base)
+		entry := resourceMetadata(resource, base, assetBaseURL)
 		resources = append(resources, entry)
 		if resource.Status == "success" {
 			content = append(content, resourceLink(resource))
@@ -586,8 +594,8 @@ func articleToolResult(item *archive.ArticleRecord, base string) map[string]any 
 	return map[string]any{"content": content, "structuredContent": structured}
 }
 
-func resourceToolResult(item *archive.ResourceRecord, base string) map[string]any {
-	metadata := resourceMetadata(item, base)
+func resourceToolResult(item *archive.ResourceRecord, base, assetBaseURL string) map[string]any {
+	metadata := resourceMetadata(item, base, assetBaseURL)
 	body, _ := json.Marshal(metadata)
 	return map[string]any{
 		"content": []any{
@@ -598,12 +606,28 @@ func resourceToolResult(item *archive.ResourceRecord, base string) map[string]an
 	}
 }
 
-func resourceMetadata(item *archive.ResourceRecord, base string) map[string]any {
+func resourceURL(item *archive.ResourceRecord, base, assetBaseURL string) string {
+	if item == nil {
+		return ""
+	}
+	if item.Status == "success" {
+		if remote := r2.PublicURL(assetBaseURL, item.LocalPath); remote != "" {
+			return remote
+		}
+	}
+	local := "/assets/" + strconv.FormatInt(item.ID, 10)
+	if strings.TrimSpace(base) == "" {
+		return local
+	}
+	return strings.TrimRight(base, "/") + local
+}
+
+func resourceMetadata(item *archive.ResourceRecord, base, assetBaseURL string) map[string]any {
 	return map[string]any{
 		"id": item.ID, "article_id": item.ArticleID, "kind": item.Kind,
 		"filename": item.Filename, "content_type": item.ContentType, "byte_size": item.ByteSize,
 		"sha256": item.SHA256, "status": item.Status, "resource_uri": resourceURI(item.ID),
-		"download_url": base + "/assets/" + strconv.FormatInt(item.ID, 10),
+		"download_url": resourceURL(item, base, assetBaseURL),
 	}
 }
 
@@ -702,7 +726,7 @@ func (h *Handler) handleReadResource(w http.ResponseWriter, r *http.Request, mes
 			return
 		}
 		result := map[string]any{"contents": []any{map[string]any{
-			"uri": input.URI, "mimeType": "text/markdown", "text": articleMarkdown(item, requestBase(r)),
+			"uri": input.URI, "mimeType": "text/markdown", "text": articleMarkdown(item, requestBase(r), h.assetBaseURL),
 		}}}
 		if modern {
 			modernResult(message.Method, result)
@@ -744,7 +768,7 @@ func writeBlobResponse(w http.ResponseWriter, id json.RawMessage, uri, contentTy
 	}
 }
 
-func articleMarkdown(item *archive.ArticleRecord, base string) string {
+func articleMarkdown(item *archive.ArticleRecord, base, assetBaseURL string) string {
 	var b strings.Builder
 	b.WriteString("# " + item.Title + "\n\n")
 	meta := make([]string, 0, 5)
@@ -773,7 +797,7 @@ func articleMarkdown(item *archive.ArticleRecord, base string) string {
 			if name == "" {
 				name = "resource-" + strconv.FormatInt(resource.ID, 10)
 			}
-			lines = append(lines, fmt.Sprintf("- [%s](%s)（[HTTP 下载](%s/assets/%d)，%d bytes）", name, resourceURI(resource.ID), base, resource.ID, resource.ByteSize))
+			lines = append(lines, fmt.Sprintf("- [%s](%s)（[HTTP 下载](%s)，%d bytes）", name, resourceURI(resource.ID), resourceURL(resource, base, assetBaseURL), resource.ByteSize))
 		}
 		if len(lines) > 0 {
 			b.WriteString("\n## " + heading + "\n\n")

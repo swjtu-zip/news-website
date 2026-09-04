@@ -665,61 +665,96 @@ func (s *Store) FindArticles(filter ArticleFilter) ([]ArticleSummary, int, error
 	}); err != nil {
 		return nil, 0, fmt.Errorf("count articles: %w", err)
 	}
-	// Avoid passing a large OFFSET to the SQLite driver. Besides doing more
-	// work than necessary, the modernc driver can return SQLITE_IOERR on this
-	// database once a filtered result set is skipped past a B-tree boundary.
-	// The count query already gives us a cheap, deterministic out-of-range
-	// check; an empty page is the correct result when the requested offset is
-	// beyond the filtered set.
+	// Avoid passing a large OFFSET or LIMIT to the SQLite driver. Besides doing
+	// more work than necessary, the modernc driver can return SQLITE_IOERR on
+	// this database once a result set is skipped past a B-tree boundary. The
+	// count query already gives us a cheap, deterministic out-of-range check;
+	// an empty page is the correct result when the requested offset is beyond
+	// the filtered set.
 	offset := 0
 	if total == 0 || filter.Page > (total-1)/filter.PageSize+1 {
 		return []ArticleSummary{}, total, nil
 	}
 	offset = (filter.Page - 1) * filter.PageSize
-	query := `SELECT a.id, a.title, a.source, a.site_id, a.site_name, a.feed_id, a.category, a.article_type,
-a.published_at, a.canonical_url, a.author, a.fetch_status FROM articles a ` + join + ` WHERE ` + where +
-		` ORDER BY CASE WHEN a.published_at = '' THEN 1 ELSE 0 END, a.published_at DESC, a.id DESC LIMIT ?`
-	// LIMIT is bounded by total and keeps the driver on the stable sequential
-	// scan path. Only the requested page is retained below.
-	args = append(args, offset+filter.PageSize)
+	const fetchChunkSize = 1000
 	var result []ArticleSummary
-	if err := retrySQLiteBusy(func() error {
-		result = result[:0]
-		rows, err := s.db.Query(query, args...)
-		if err != nil {
-			return err
+	scanned := 0
+	hasCursor := false
+	cursorGroup := 0
+	cursorPublishedAt := ""
+	var cursorID int64
+	for scanned < offset+filter.PageSize {
+		queryWhere := where
+		queryArgs := append([]any(nil), args...)
+		if hasCursor {
+			const sortGroup = "CASE WHEN a.published_at = '' THEN 1 ELSE 0 END"
+			queryWhere += ` AND (` + sortGroup + ` > ? OR (` + sortGroup + ` = ? AND
+(a.published_at < ? OR (a.published_at = ? AND a.id < ?))))`
+			queryArgs = append(queryArgs, cursorGroup, cursorGroup, cursorPublishedAt, cursorPublishedAt, cursorID)
 		}
-		defer rows.Close()
-		skipped := 0
-		for rows.Next() {
-			var item ArticleSummary
-			if err := rows.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
-				&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status); err != nil {
+		remaining := offset + filter.PageSize - scanned
+		limit := fetchChunkSize
+		if remaining < limit {
+			limit = remaining
+		}
+		query := `SELECT a.id, a.title, a.source, a.site_id, a.site_name, a.feed_id, a.category, a.article_type,
+a.published_at, a.canonical_url, a.author, a.fetch_status FROM articles a ` + join + ` WHERE ` + queryWhere +
+			` ORDER BY CASE WHEN a.published_at = '' THEN 1 ELSE 0 END, a.published_at DESC, a.id DESC LIMIT ?`
+		queryArgs = append(queryArgs, limit)
+		var batch []ArticleSummary
+		if err := retrySQLiteBusy(func() error {
+			batch = batch[:0]
+			rows, err := s.db.Query(query, queryArgs...)
+			if err != nil {
 				return err
 			}
-			if skipped < offset {
-				skipped++
-				continue
+			defer rows.Close()
+			for rows.Next() {
+				var item ArticleSummary
+				if err := rows.Scan(&item.ID, &item.Title, &item.Source, &item.SiteID, &item.SiteName, &item.FeedID,
+					&item.Category, &item.Type, &item.PublishedAt, &item.CanonicalURL, &item.Author, &item.Status); err != nil {
+					return err
+				}
+				batch = append(batch, item)
 			}
-			result = append(result, item)
+			return rows.Err()
+		}); err != nil {
+			return nil, 0, fmt.Errorf("query articles: %w", err)
 		}
-		return rows.Err()
-	}); err != nil {
-		return nil, 0, fmt.Errorf("query articles: %w", err)
+		if len(batch) == 0 {
+			break
+		}
+		for _, item := range batch {
+			scanned++
+			cursorGroup = 0
+			if item.PublishedAt == "" {
+				cursorGroup = 1
+			}
+			cursorPublishedAt = item.PublishedAt
+			cursorID = item.ID
+			hasCursor = true
+			if scanned > offset {
+				result = append(result, item)
+			}
+		}
+		if len(batch) < limit {
+			break
+		}
 	}
 	return result, total, nil
 }
 
-// retrySQLiteBusy tolerates a short writer/readers collision between the web
-// process and the one-shot sync container, which use the same WAL database.
+// retrySQLiteBusy tolerates short-lived writer/readers collisions and the
+// transient extended IOERR returned by modernc.org/sqlite while the web
+// process and the one-shot sync container use the same WAL database.
 func retrySQLiteBusy(operation func() error) error {
-	const attempts = 3
+	const attempts = 5
 	for attempt := 0; attempt < attempts; attempt++ {
 		err := operation()
 		if err == nil || !isSQLiteBusy(err) || attempt == attempts-1 {
 			return err
 		}
-		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+		time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
 	}
 	return nil
 }
@@ -730,7 +765,8 @@ func isSQLiteBusy(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "locked") || strings.Contains(text, "sqlite_busy") ||
-		(strings.Contains(text, "busy") && strings.Contains(text, "database"))
+		(strings.Contains(text, "busy") && strings.Contains(text, "database")) ||
+		strings.Contains(text, "disk i/o error") || strings.Contains(text, "sqlite_ioerr")
 }
 
 func articleWhere(filter ArticleFilter) (string, []any, string) {

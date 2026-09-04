@@ -21,15 +21,17 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"swjtu-archive/internal/archive"
 	"swjtu-archive/internal/mcp"
+	"swjtu-archive/internal/r2"
 	"swjtu-cli/pkg/sdk"
 )
 
 // Server exposes the read-only archive UI and JSON API.
 type Server struct {
-	store     *archive.Store
-	diskMu    sync.Mutex
-	diskAt    time.Time
-	diskStats diskStats
+	store        *archive.Store
+	assetBaseURL string
+	diskMu       sync.Mutex
+	diskAt       time.Time
+	diskStats    diskStats
 }
 
 // diskStats describes how much disk the archive occupies and how much space
@@ -41,7 +43,36 @@ type diskStats struct {
 	OK           bool
 }
 
-func NewServer(store *archive.Store) *Server { return &Server{store: store} }
+func NewServer(store *archive.Store, assetBaseURLs ...string) *Server {
+	assetBaseURL := ""
+	if len(assetBaseURLs) > 0 {
+		assetBaseURL = strings.TrimRight(strings.TrimSpace(assetBaseURLs[0]), "/")
+	}
+	return &Server{store: store, assetBaseURL: assetBaseURL}
+}
+
+type resourceView struct {
+	ID       int64
+	Filename string
+	ByteSize int64
+	URL      string
+}
+
+func (s *Server) resourceURL(item *archive.ResourceRecord, base string) string {
+	if item == nil {
+		return ""
+	}
+	if item.Status == "success" {
+		if remote := r2.PublicURL(s.assetBaseURL, item.LocalPath); remote != "" {
+			return remote
+		}
+	}
+	local := "/assets/" + strconv.FormatInt(item.ID, 10)
+	if strings.TrimSpace(base) == "" {
+		return local
+	}
+	return strings.TrimRight(base, "/") + local
+}
 
 // diskUsage measures the archive's footprint by walking the data directory
 // and reads filesystem capacity from statfs. The walk can be slow on large
@@ -98,7 +129,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/assets/", s.handleResource)
 	mux.HandleFunc("/article/", s.handleArticlePage)
 	mux.HandleFunc("/help/mcp", s.handleMCPGuide)
-	mux.Handle("/mcp", mcp.NewHandler(s.store))
+	mux.Handle("/mcp", mcp.NewHandler(s.store, s.assetBaseURL))
 	mux.HandleFunc("/", s.handleIndex)
 	return withCache(withCORS(mux))
 }
@@ -175,6 +206,10 @@ func (s *Server) handleResource(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.Resource(id)
 	if err != nil || item.Status != "success" {
 		http.NotFound(w, r)
+		return
+	}
+	if remoteURL := s.resourceURL(item, requestBase(r)); strings.HasPrefix(remoteURL, "http://") || strings.HasPrefix(remoteURL, "https://") {
+		http.Redirect(w, r, remoteURL, http.StatusTemporaryRedirect)
 		return
 	}
 	file, err := s.store.OpenResource(item)
@@ -351,16 +386,17 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 	data := struct {
 		Item        *archive.ArticleRecord
 		ContentHTML template.HTML
-		Images      []archive.ResourceRecord
-		Attachments []archive.ResourceRecord
+		Images      []resourceView
+		Attachments []resourceView
 		RenderedAt  string
 		RenderMS    string
 	}{Item: item, ContentHTML: s.safeContent(item)}
 	for _, resource := range item.Resources {
+		view := resourceView{ID: resource.ID, Filename: resource.Filename, ByteSize: resource.ByteSize, URL: s.resourceURL(&resource, requestBase(r))}
 		if resource.Kind == "image" {
-			data.Images = append(data.Images, resource)
+			data.Images = append(data.Images, view)
 		} else if resource.Kind == "attachment" {
-			data.Attachments = append(data.Attachments, resource)
+			data.Attachments = append(data.Attachments, view)
 		}
 	}
 	data.RenderMS = fmt.Sprintf("%.1f", float64(time.Since(start).Microseconds())/1000)
@@ -514,7 +550,7 @@ func (s *Server) articleMarkdown(item *archive.ArticleRecord, base string) strin
 	if len(attachments) > 0 {
 		b.WriteString("\n## 附件\n\n")
 		for _, attachment := range attachments {
-			fmt.Fprintf(&b, "- [%s](%s/assets/%d)（%d bytes）\n", attachment.Filename, base, attachment.ID, attachment.ByteSize)
+			fmt.Fprintf(&b, "- [%s](%s)（%d bytes）\n", attachment.Filename, s.resourceURL(&attachment, base), attachment.ByteSize)
 		}
 	}
 	if item.CanonicalURL != "" {
@@ -530,7 +566,7 @@ func (s *Server) articleResponse(item *archive.ArticleRecord) map[string]any {
 			"id": resource.ID, "kind": resource.Kind, "original_url": resource.OriginalURL,
 			"filename": resource.Filename, "content_type": resource.ContentType,
 			"byte_size": resource.ByteSize, "sha256": resource.SHA256, "status": resource.Status,
-			"error": resource.Error, "url": "/assets/" + strconv.FormatInt(resource.ID, 10),
+			"error": resource.Error, "url": s.resourceURL(&resource, ""),
 		})
 	}
 	return map[string]any{
@@ -564,7 +600,7 @@ func (s *Server) safeContent(item *archive.ArticleRecord) template.HTML {
 	resourceURLs := make(map[string]string)
 	for _, resource := range item.Resources {
 		if resource.Status == "success" {
-			resourceURLs[resource.OriginalURL] = "/assets/" + strconv.FormatInt(resource.ID, 10)
+			resourceURLs[resource.OriginalURL] = s.resourceURL(&resource, "")
 		}
 	}
 	doc.Find("script, style, iframe, object, embed, form, input, button, textarea, select, meta, link").Remove()
@@ -731,8 +767,8 @@ func contentDisposition(filename string) string {
 }
 
 const (
-	indexCacheControl     = "public, max-age=3600, s-maxage=3600"
-	indexCDNCacheControl  = "public, max-age=3600"
+	indexCacheControl     = "public, max-age=86400, s-maxage=31536000"
+	indexCDNCacheControl  = "public, max-age=31536000"
 	staticCacheControl    = "public, max-age=86400, s-maxage=31536000"
 	staticCDNCacheControl = "public, max-age=31536000"
 	apiCacheControl       = "public, max-age=0, s-maxage=120"
@@ -791,8 +827,9 @@ func responseCachePolicy(r *http.Request, status int) (string, string) {
 	if status >= http.StatusBadRequest {
 		return errorCacheControl, errorCDNCacheControl
 	}
-	// The index is a dynamic list (article counts, disk-usage footer), so it
-	// gets a one-hour cache while detail pages and assets stay long-lived.
+	// HTML pages and successfully archived assets are treated as stable public
+	// content: browsers keep them for one day while the edge may keep them for
+	// one year. API responses are handled by the branch below with a short TTL.
 	if r.URL.Path == "/" {
 		return indexCacheControl, indexCDNCacheControl
 	}
@@ -1070,12 +1107,12 @@ h1{font-size:24px;line-height:1.45;text-align:center;margin:0 0 14px}
 </style></head><body>
 <header class="reading-bar"><div class="bar-inner"><div class="bar-main"><a class="back" href="/"><span aria-hidden="true">←</span> <span class="back-label">返回列表</span></a><span class="bar-source" title="{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}">来源：{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}</span><span class="bar-time">时间：{{if .Item.PublishedAt}}{{.Item.PublishedAt}}{{else}}未标注{{end}}</span><span class="bar-divider" aria-hidden="true"></span><span class="bar-title" title="{{.Item.Title}}">{{.Item.Title}}</span>{{if .Item.CanonicalURL}}<a class="original-button" href="{{.Item.CanonicalURL}}" target="_blank" rel="noopener">阅读原文 ↗</a>{{end}}</div><div class="bar-second"><span class="bar-second-label">标题</span><span class="bar-second-title" title="{{.Item.Title}}">{{.Item.Title}}</span></div></div></header>
 <div class="article-layout">
-<aside class="article-side" aria-label="文章信息"><a class="back side-back" href="/">← 返回列表</a><div class="side-card"><div class="side-info"><div class="side-field"><span class="side-label">来源</span><span class="side-value">{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}</span></div><div class="side-field"><span class="side-label">时间</span><span class="side-value">{{if .Item.PublishedAt}}{{.Item.PublishedAt}}{{else}}未标注{{end}}</span></div><div class="side-field"><span class="side-label">标题</span><span class="side-value side-title" title="{{.Item.Title}}">{{.Item.Title}}</span></div></div>{{if .Item.CanonicalURL}}<a class="original-button" href="{{.Item.CanonicalURL}}" target="_blank" rel="noopener">阅读原文 ↗</a>{{end}}{{if .Attachments}}<section class="side-resources"><h2>附件（{{len .Attachments}}）</h2><ul>{{range .Attachments}}<li><a href="/assets/{{.ID}}" download="{{.Filename}}" title="{{.Filename}}"><span aria-hidden="true">↓</span><span class="attachment-name">{{.Filename}}</span><span class="attachment-size">{{.ByteSize}} B</span></a></li>{{end}}</ul></section>{{end}}</div></aside>
+<aside class="article-side" aria-label="文章信息"><a class="back side-back" href="/">← 返回列表</a><div class="side-card"><div class="side-info"><div class="side-field"><span class="side-label">来源</span><span class="side-value">{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}</span></div><div class="side-field"><span class="side-label">时间</span><span class="side-value">{{if .Item.PublishedAt}}{{.Item.PublishedAt}}{{else}}未标注{{end}}</span></div><div class="side-field"><span class="side-label">标题</span><span class="side-value side-title" title="{{.Item.Title}}">{{.Item.Title}}</span></div></div>{{if .Item.CanonicalURL}}<a class="original-button" href="{{.Item.CanonicalURL}}" target="_blank" rel="noopener">阅读原文 ↗</a>{{end}}{{if .Attachments}}<section class="side-resources"><h2>附件（{{len .Attachments}}）</h2><ul>{{range .Attachments}}<li><a href="{{.URL}}" download="{{.Filename}}" title="{{.Filename}}"><span aria-hidden="true">↓</span><span class="attachment-name">{{.Filename}}</span><span class="attachment-size">{{.ByteSize}} B</span></a></li>{{end}}</ul></section>{{end}}</div></aside>
 <main class="paper">
 <h1>{{.Item.Title}}</h1>
 <div class="meta"><span class="badge">{{.Item.SiteName}}</span><span>{{.Item.PublishedAt}}</span>{{if .Item.Type}}<span class="dot"></span><span>类型：{{.Item.Type}}</span>{{end}}{{if .Item.Source}}<span class="dot"></span><span>来源：{{.Item.Source}}</span>{{end}}{{if .Item.Author}}<span class="dot"></span><span>作者：{{.Item.Author}}</span>{{end}}{{if .Item.Photographer}}<span class="dot"></span><span>摄影：{{.Item.Photographer}}</span>{{end}}{{if .Item.Editor}}<span class="dot"></span><span>编辑：{{.Item.Editor}}</span>{{end}}</div>
 <div class="content">{{.ContentHTML}}</div>
-{{if .Attachments}}<section class="resources resources-inline"><h2>附件</h2><ul>{{range .Attachments}}<li><a href="/assets/{{.ID}}" download="{{.Filename}}">{{.Filename}}<span class="size">{{.ByteSize}} bytes</span></a></li>{{end}}</ul></section>{{end}}
+{{if .Attachments}}<section class="resources resources-inline"><h2>附件</h2><ul>{{range .Attachments}}<li><a href="{{.URL}}" download="{{.Filename}}">{{.Filename}}<span class="size">{{.ByteSize}} bytes</span></a></li>{{end}}</ul></section>{{end}}
 </main></div>
 <footer class="footer"><span>服务器于 {{.RenderedAt}} 提供，耗时 {{.RenderMS}} ms</span></footer>
 </body></html>`))

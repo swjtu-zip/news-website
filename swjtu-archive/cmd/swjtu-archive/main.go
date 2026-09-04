@@ -14,6 +14,7 @@ import (
 
 	"swjtu-archive/internal/archive"
 	"swjtu-archive/internal/config"
+	"swjtu-archive/internal/r2"
 	"swjtu-archive/internal/web"
 	"swjtu-cli/pkg/sdk"
 )
@@ -40,10 +41,22 @@ func main() {
 		Timeout:   30 * time.Second,
 		Transport: resourceTransport,
 	}})
+	var resourceUploader archive.ResourceUploader
+	if cfg.R2Enabled() {
+		uploader, err := r2.New(r2.Config{
+			Endpoint: cfg.R2Endpoint, Bucket: cfg.R2Bucket, Prefix: cfg.R2Prefix,
+			AccessKeyID: cfg.R2AccessKeyID, SecretAccessKey: cfg.R2SecretAccessKey,
+		})
+		if err != nil {
+			logger.Fatal(err)
+		}
+		resourceUploader = uploader
+		logger.Printf("R2 resource uploads enabled: bucket=%s prefix=%s", cfg.R2Bucket, cfg.R2Prefix)
+	}
 	syncer := archive.NewSyncer(store, client, archive.SyncOptions{
 		Backfill: cfg.Backfill, MaxPages: cfg.MaxPages, MaxConcurrent: cfg.MaxConcurrent,
 		RequestGap: cfg.RequestGap, RefreshAfter: cfg.RefreshAfter,
-		MaxResourceBytes: cfg.MaxResourceBytes, Logger: logger,
+		MaxResourceBytes: cfg.MaxResourceBytes, ResourceUploader: resourceUploader, Logger: logger,
 	})
 
 	command := "serve"
@@ -94,7 +107,7 @@ func runServer(cfg config.Config, syncer *archive.Syncer, logger *log.Logger) {
 		go runSync()
 	}
 
-	server := &http.Server{Addr: cfg.Addr, Handler: web.NewServer(syncer.Store()).Handler()}
+	server := &http.Server{Addr: cfg.Addr, Handler: web.NewServer(syncer.Store(), cfg.AssetBaseURL).Handler()}
 	// Keep the store owned by the syncer but expose it to the HTTP layer through
 	// this small accessor rather than duplicating database connections.
 	go func() {
