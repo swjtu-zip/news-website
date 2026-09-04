@@ -423,6 +423,43 @@ func TestSaveResourceBodyRejectsOversize(t *testing.T) {
 	}
 }
 
+func TestSiteFacetsAggregatesWithoutSQLiteTempSort(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	sites := []struct {
+		id, name string
+		count    int
+	}{
+		{id: "school-a", name: "甲学院", count: 3},
+		{id: "school-b", name: "乙学院", count: 1},
+	}
+	for _, site := range sites {
+		feed := sdk.Feed{ID: "news:" + site.id, SiteID: site.id, SiteName: site.name, Category: "school", Name: site.name, BaseURL: "https://example.com"}
+		for i := 0; i < site.count; i++ {
+			if _, err := store.UpsertArticle(ArticleInput{
+				Feed:      feed,
+				Item:      sdk.NewsItem{Title: site.name, URL: "https://example.com/" + site.id + "/" + string(rune('a'+i))},
+				FetchedAt: time.Now(),
+				Article:   &sdk.Article{Title: site.name, Date: "2026-08-01", Content: "content"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	facets, err := store.SiteFacets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facets) != 2 || facets[0].SiteID != "school-a" || facets[0].Count != 3 || facets[1].SiteID != "school-b" || facets[1].Count != 1 {
+		t.Fatalf("facets = %#v", facets)
+	}
+}
+
 func TestNormalizeDate(t *testing.T) {
 	cases := map[string]string{
 		"2026-08-22":           "2026-08-22",

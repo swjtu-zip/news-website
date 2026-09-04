@@ -1031,26 +1031,52 @@ type SiteFacet struct {
 }
 
 // SiteFacets returns article counts grouped by source site, most articles first.
+//
+// Keep the aggregation in Go instead of asking SQLite to build a temporary
+// GROUP BY/ORDER BY result.  On the large WAL database the modernc driver can
+// sporadically report SQLITE_IOERR while materializing that temporary result,
+// even though ordinary indexed article reads still succeed.  The raw scan is
+// small enough for this sidebar (one row per article) and avoids that fragile
+// temporary B-tree.
 func (s *Store) SiteFacets() ([]SiteFacet, error) {
-	var facets []SiteFacet
+	type facetKey struct {
+		id   string
+		name string
+	}
+	counts := make(map[facetKey]int)
 	err := retrySQLiteBusy(func() error {
-		facets = facets[:0]
-		rows, err := s.db.Query(`SELECT site_id, site_name, COUNT(*) FROM articles
-GROUP BY site_id, site_name ORDER BY COUNT(*) DESC, site_id`)
+		counts = make(map[facetKey]int)
+		rows, err := s.db.Query(`SELECT site_id, site_name FROM articles`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var facet SiteFacet
-			if err := rows.Scan(&facet.SiteID, &facet.SiteName, &facet.Count); err != nil {
+			var key facetKey
+			if err := rows.Scan(&key.id, &key.name); err != nil {
 				return err
 			}
-			facets = append(facets, facet)
+			counts[key]++
 		}
 		return rows.Err()
 	})
-	return facets, err
+	if err != nil {
+		return nil, err
+	}
+	facets := make([]SiteFacet, 0, len(counts))
+	for key, count := range counts {
+		facets = append(facets, SiteFacet{SiteID: key.id, SiteName: key.name, Count: count})
+	}
+	sort.Slice(facets, func(i, j int) bool {
+		if facets[i].Count != facets[j].Count {
+			return facets[i].Count > facets[j].Count
+		}
+		if facets[i].SiteID != facets[j].SiteID {
+			return facets[i].SiteID < facets[j].SiteID
+		}
+		return facets[i].SiteName < facets[j].SiteName
+	})
+	return facets, nil
 }
 
 var dateFormats = []string{"2006-01-02", "2006/01/02", "2006.01.02", "2006年01月02日", "2006-1-2", "2006/1/2", "2006年1月2日", "2006.1.2"}
