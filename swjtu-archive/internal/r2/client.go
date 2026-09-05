@@ -170,6 +170,16 @@ func (c *Client) ExistingStorageClass(ctx context.Context, localPath string) (st
 	if !ok {
 		return "", fmt.Errorf("invalid resource path %q", localPath)
 	}
+	return c.ObjectStorageClass(ctx, key)
+}
+
+// ObjectStorageClass reports the storage class of an exact R2 object key. It
+// returns an empty string when the object does not exist.
+func (c *Client) ObjectStorageClass(ctx context.Context, key string) (string, error) {
+	key = strings.TrimSpace(strings.ReplaceAll(key, "\\", "/"))
+	if key == "" || path.Clean(key) != key || strings.HasPrefix(key, "../") || key == ".." {
+		return "", fmt.Errorf("invalid object key %q", key)
+	}
 	resp, err := c.do(ctx, http.MethodHead, key, nil, 0, emptySHA256, "", "", "", "")
 	if err != nil {
 		return "", err
@@ -188,13 +198,23 @@ func (c *Client) ExistingStorageClass(ctx context.Context, localPath string) (st
 	return strings.ToUpper(storageClass), nil
 }
 
-// ChangeStorageClass uses R2's server-side CopyObject operation, avoiding a
-// second transfer through the crawler host when a migrated object needs to be
-// changed from STANDARD to STANDARD_IA.
+// ChangeStorageClass changes the storage class for a local archive path using
+// R2's server-side CopyObject operation. It avoids transferring the object
+// through the crawler host.
 func (c *Client) ChangeStorageClass(ctx context.Context, localPath, storageClass string) error {
 	key, ok := ObjectKey(c.prefix, localPath)
 	if !ok {
 		return fmt.Errorf("invalid resource path %q", localPath)
+	}
+	return c.ChangeObjectStorageClass(ctx, key, storageClass)
+}
+
+// ChangeObjectStorageClass changes the storage class for an exact R2 object
+// key using the server-side CopyObject operation.
+func (c *Client) ChangeObjectStorageClass(ctx context.Context, key, storageClass string) error {
+	key = strings.TrimSpace(strings.ReplaceAll(key, "\\", "/"))
+	if key == "" || path.Clean(key) != key || strings.HasPrefix(key, "../") || key == ".." {
+		return fmt.Errorf("invalid object key %q", key)
 	}
 	storageClass = normalizeStorageClass(storageClass)
 	if storageClass == "" {

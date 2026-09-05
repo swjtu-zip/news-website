@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"mime"
 	"os"
@@ -54,6 +55,8 @@ func main() {
 	deleteLocal := flag.Bool("delete-local", false, "delete each local asset only after its R2 object is confirmed or uploaded")
 	listPrefix := flag.String("list-prefix", "", "list object count below this prefix without changing anything")
 	deletePrefix := flag.String("delete-prefix", "", "delete every object below this exact prefix instead of syncing")
+	changeStorageClass := flag.String("change-storage-class", "", "change existing objects below --change-prefix to STANDARD or STANDARD_IA")
+	changePrefix := flag.String("change-prefix", "", "R2 object prefix for --change-storage-class (defaults to the configured prefix)")
 	flag.Parse()
 
 	if *workers < 1 || *maxFiles < 0 {
@@ -85,6 +88,20 @@ func main() {
 		log.Printf("found %d objects below %s", len(keys), *listPrefix)
 		if len(keys) > 0 {
 			log.Printf("first=%s last=%s", keys[0], keys[len(keys)-1])
+		}
+		return
+	}
+	if strings.TrimSpace(*changeStorageClass) != "" {
+		targetClass := normalizeTargetStorageClass(*changeStorageClass)
+		if targetClass == "" {
+			log.Fatalf("unsupported target storage class %q; use STANDARD or STANDARD_IA", *changeStorageClass)
+		}
+		targetPrefix := strings.TrimSpace(*changePrefix)
+		if targetPrefix == "" {
+			targetPrefix = strings.Trim(strings.TrimSpace(*prefix), "/") + "/"
+		}
+		if err := changeExistingStorageClasses(ctx, client, targetPrefix, targetClass, *workers); err != nil {
+			log.Fatal(err)
 		}
 		return
 	}
@@ -294,6 +311,92 @@ func deleteObjects(ctx context.Context, client *r2.Client, prefix string, worker
 		return int(atomic.LoadInt64(&deleted)), firstErr
 	}
 	return int(atomic.LoadInt64(&deleted)), ctx.Err()
+}
+
+func changeExistingStorageClasses(ctx context.Context, client *r2.Client, prefix, targetClass string, workers int) error {
+	keys, err := retryKeys(ctx, func() ([]string, error) { return client.ListPrefix(ctx, prefix) })
+	if err != nil {
+		return fmt.Errorf("list objects below %s: %w", prefix, err)
+	}
+	log.Printf("found %d objects below %s", len(keys), prefix)
+	jobs := make(chan string, workers*2)
+	var wg sync.WaitGroup
+	var scanned int64
+	var unchanged int64
+	var changed int64
+	var failed int64
+	var firstErr error
+	var errMu sync.Mutex
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range jobs {
+				class, err := retry(ctx, func() (string, error) {
+					return client.ObjectStorageClass(ctx, key)
+				})
+				if err == nil && class == "" {
+					err = errors.New("object disappeared during storage-class migration")
+				}
+				if err == nil && class == targetClass {
+					atomic.AddInt64(&unchanged, 1)
+				} else if err == nil && (class == "STANDARD" || class == "STANDARD_IA") {
+					err = retryErr(ctx, func() error {
+						return client.ChangeObjectStorageClass(ctx, key, targetClass)
+					})
+					if err == nil {
+						atomic.AddInt64(&changed, 1)
+					}
+				} else if err == nil {
+					err = fmt.Errorf("unsupported storage class %q", class)
+				}
+				if err != nil {
+					atomic.AddInt64(&failed, 1)
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("%s: %w", key, err)
+					}
+					errMu.Unlock()
+					log.Printf("storage class %s: %v", key, err)
+				}
+				n := atomic.AddInt64(&scanned, 1)
+				if n%100 == 0 || n == int64(len(keys)) {
+					log.Printf("progress scanned=%d unchanged=%d changed=%d failed=%d", n, atomic.LoadInt64(&unchanged), atomic.LoadInt64(&changed), atomic.LoadInt64(&failed))
+				}
+			}
+		}()
+	}
+	for _, key := range keys {
+		select {
+		case jobs <- key:
+		case <-ctx.Done():
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	log.Printf("complete scanned=%d unchanged=%d changed=%d failed=%d", atomic.LoadInt64(&scanned), atomic.LoadInt64(&unchanged), atomic.LoadInt64(&changed), atomic.LoadInt64(&failed))
+	if firstErr != nil {
+		return firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeTargetStorageClass(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "STANDARD":
+		return "STANDARD"
+	case "STANDARD_IA", "INFREQUENTACCESS", "INFREQUENT_ACCESS":
+		return "STANDARD_IA"
+	default:
+		return ""
+	}
 }
 
 func retry(ctx context.Context, operation func() (string, error)) (string, error) {

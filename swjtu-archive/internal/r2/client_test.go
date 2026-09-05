@@ -58,3 +58,25 @@ func TestUploadSetsR2Metadata(t *testing.T) {
 		t.Fatalf("metadata = type %q class %q disposition %q", gotType, gotClass, gotDisposition)
 	}
 }
+
+func TestChangeObjectStorageClassUsesServerSideCopy(t *testing.T) {
+	var gotPath, gotSource, gotDirective, gotClass string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotSource = r.Header.Get("x-amz-copy-source")
+		gotDirective = r.Header.Get("x-amz-metadata-directive")
+		gotClass = r.Header.Get("x-amz-storage-class")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, err := New(Config{Endpoint: server.URL, Bucket: "swjtu-zip", Prefix: "news-assets", AccessKeyID: "key", SecretAccessKey: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ChangeObjectStorageClass(context.Background(), "news-assets/ab/hash.png", "STANDARD"); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/swjtu-zip/news-assets/ab/hash.png" || gotSource != "/swjtu-zip/news-assets/ab/hash.png" || gotDirective != "COPY" || gotClass != "STANDARD" {
+		t.Fatalf("copy request = path %q source %q directive %q class %q", gotPath, gotSource, gotDirective, gotClass)
+	}
+}
