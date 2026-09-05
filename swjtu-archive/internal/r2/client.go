@@ -244,14 +244,20 @@ func (c *Client) ChangeObjectStorageClass(ctx context.Context, key, storageClass
 	return nil
 }
 
-// ListPrefix returns all object keys below a prefix using S3's paginated
-// ListObjectsV2 operation.
-func (c *Client) ListPrefix(ctx context.Context, prefix string) ([]string, error) {
+// ObjectInfo contains the key and storage class returned by R2's object list.
+type ObjectInfo struct {
+	Key          string
+	StorageClass string
+}
+
+// ListObjects returns objects below a prefix, including their storage class,
+// using S3's paginated ListObjectsV2 operation.
+func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" || strings.Contains(path.Clean(prefix), "..") {
 		return nil, fmt.Errorf("invalid object prefix %q", prefix)
 	}
-	var keys []string
+	var objects []ObjectInfo
 	var continuation string
 	for {
 		target := *c.endpoint
@@ -292,14 +298,32 @@ func (c *Client) ListPrefix(ctx context.Context, prefix string) ([]string, error
 		}
 		for _, object := range result.Contents {
 			if object.Key != "" {
-				keys = append(keys, object.Key)
+				storageClass := strings.ToUpper(strings.TrimSpace(object.StorageClass))
+				if storageClass == "" {
+					storageClass = "STANDARD"
+				}
+				objects = append(objects, ObjectInfo{Key: object.Key, StorageClass: storageClass})
 			}
 		}
 		if !result.IsTruncated || result.NextContinuationToken == "" {
-			return keys, nil
+			return objects, nil
 		}
 		continuation = result.NextContinuationToken
 	}
+}
+
+// ListPrefix returns all object keys below a prefix using S3's paginated
+// ListObjectsV2 operation.
+func (c *Client) ListPrefix(ctx context.Context, prefix string) ([]string, error) {
+	objects, err := c.ListObjects(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(objects))
+	for _, object := range objects {
+		keys = append(keys, object.Key)
+	}
+	return keys, nil
 }
 
 // DeleteObject removes one exact object key. Callers should list and verify a
@@ -324,7 +348,8 @@ type listObjectsV2Response struct {
 	IsTruncated           bool   `xml:"IsTruncated"`
 	NextContinuationToken string `xml:"NextContinuationToken"`
 	Contents              []struct {
-		Key string `xml:"Key"`
+		Key          string `xml:"Key"`
+		StorageClass string `xml:"StorageClass"`
 	} `xml:"Contents"`
 }
 

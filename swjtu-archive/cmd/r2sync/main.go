@@ -1,7 +1,7 @@
 // Command r2sync mirrors the local content-addressed assets tree to R2.
 // It is intentionally resumable: an existing object with the requested
-// storage class is skipped, while an existing object with the wrong class is
-// changed server-side when possible.
+// storage class is skipped. The optional storage-class migration mode changes
+// only objects reported by R2 as having the other supported class.
 package main
 
 import (
@@ -100,6 +100,11 @@ func main() {
 		if targetPrefix == "" {
 			targetPrefix = strings.Trim(strings.TrimSpace(*prefix), "/") + "/"
 		}
+		targetPrefix = strings.Trim(targetPrefix, "/")
+		if targetPrefix == "" || targetPrefix == "." || strings.Contains(path.Clean(targetPrefix), "..") {
+			log.Fatalf("invalid R2 object prefix %q", *changePrefix)
+		}
+		targetPrefix += "/"
 		if err := changeExistingStorageClasses(ctx, client, targetPrefix, targetClass, *workers); err != nil {
 			log.Fatal(err)
 		}
@@ -314,12 +319,12 @@ func deleteObjects(ctx context.Context, client *r2.Client, prefix string, worker
 }
 
 func changeExistingStorageClasses(ctx context.Context, client *r2.Client, prefix, targetClass string, workers int) error {
-	keys, err := retryKeys(ctx, func() ([]string, error) { return client.ListPrefix(ctx, prefix) })
+	objects, err := retryObjects(ctx, func() ([]r2.ObjectInfo, error) { return client.ListObjects(ctx, prefix) })
 	if err != nil {
 		return fmt.Errorf("list objects below %s: %w", prefix, err)
 	}
-	log.Printf("found %d objects below %s", len(keys), prefix)
-	jobs := make(chan string, workers*2)
+	log.Printf("listed %d objects below %s; only objects already marked STANDARD_IA will be changed", len(objects), prefix)
+	jobs := make(chan r2.ObjectInfo, workers*2)
 	var wg sync.WaitGroup
 	var scanned int64
 	var unchanged int64
@@ -331,23 +336,20 @@ func changeExistingStorageClasses(ctx context.Context, client *r2.Client, prefix
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for key := range jobs {
-				class, err := retry(ctx, func() (string, error) {
-					return client.ObjectStorageClass(ctx, key)
-				})
-				if err == nil && class == "" {
-					err = errors.New("object disappeared during storage-class migration")
-				}
-				if err == nil && class == targetClass {
+			for object := range jobs {
+				key := object.Key
+				class := object.StorageClass
+				var err error
+				if class == targetClass {
 					atomic.AddInt64(&unchanged, 1)
-				} else if err == nil && (class == "STANDARD" || class == "STANDARD_IA") {
+				} else if class == "STANDARD" || class == "STANDARD_IA" {
 					err = retryErr(ctx, func() error {
 						return client.ChangeObjectStorageClass(ctx, key, targetClass)
 					})
 					if err == nil {
 						atomic.AddInt64(&changed, 1)
 					}
-				} else if err == nil {
+				} else {
 					err = fmt.Errorf("unsupported storage class %q", class)
 				}
 				if err != nil {
@@ -360,15 +362,15 @@ func changeExistingStorageClasses(ctx context.Context, client *r2.Client, prefix
 					log.Printf("storage class %s: %v", key, err)
 				}
 				n := atomic.AddInt64(&scanned, 1)
-				if n%100 == 0 || n == int64(len(keys)) {
+				if n%100 == 0 || n == int64(len(objects)) {
 					log.Printf("progress scanned=%d unchanged=%d changed=%d failed=%d", n, atomic.LoadInt64(&unchanged), atomic.LoadInt64(&changed), atomic.LoadInt64(&failed))
 				}
 			}
 		}()
 	}
-	for _, key := range keys {
+	for _, object := range objects {
 		select {
-		case jobs <- key:
+		case jobs <- object:
 		case <-ctx.Done():
 			break
 		}
@@ -415,6 +417,21 @@ func retry(ctx context.Context, operation func() (string, error)) (string, error
 }
 
 func retryKeys(ctx context.Context, operation func() ([]string, error)) ([]string, error) {
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		value, err := operation()
+		if err == nil {
+			return value, nil
+		}
+		last = err
+		if err := waitRetry(ctx, attempt); err != nil {
+			return nil, err
+		}
+	}
+	return nil, last
+}
+
+func retryObjects(ctx context.Context, operation func() ([]r2.ObjectInfo, error)) ([]r2.ObjectInfo, error) {
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
 		value, err := operation()

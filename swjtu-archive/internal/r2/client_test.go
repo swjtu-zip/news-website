@@ -80,3 +80,22 @@ func TestChangeObjectStorageClassUsesServerSideCopy(t *testing.T) {
 		t.Fatalf("copy request = path %q source %q directive %q class %q", gotPath, gotSource, gotDirective, gotClass)
 	}
 }
+
+func TestListObjectsIncludesStorageClass(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>news-assets/ia.bin</Key><StorageClass>STANDARD_IA</StorageClass></Contents><Contents><Key>news-assets/standard.bin</Key><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>`))
+	}))
+	defer server.Close()
+	client, err := New(Config{Endpoint: server.URL, Bucket: "swjtu-zip", Prefix: "news-assets", AccessKeyID: "key", SecretAccessKey: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, err := client.ListObjects(context.Background(), "news-assets/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 2 || objects[0].Key != "news-assets/ia.bin" || objects[0].StorageClass != "STANDARD_IA" || objects[1].StorageClass != "STANDARD" {
+		t.Fatalf("objects = %#v", objects)
+	}
+}
