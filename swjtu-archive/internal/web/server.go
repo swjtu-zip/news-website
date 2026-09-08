@@ -273,12 +273,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Add("Vary", "Accept")
-	month := r.URL.Query().Get("month")
-	if !validMonth(month) {
-		month = ""
-	}
+	fromMonth, toMonth := monthRange(r.URL.Query())
 	if prefersMarkdown(r) {
-		writeMarkdown(w, s.indexMarkdown(r, items, total, filter, month))
+		writeMarkdown(w, s.indexMarkdown(r, items, total, filter, fromMonth, toMonth))
 		return
 	}
 	type siteItem struct {
@@ -306,7 +303,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		pageNumbers = append(pageNumbers, pageItem{
-			Number: number, URL: pageURL(filter, month, number), Current: number == filter.Page,
+			Number: number, URL: pageURL(filter, fromMonth, toMonth, number), Current: number == filter.Page,
 		})
 	}
 	data := struct {
@@ -319,7 +316,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		PageSize   int
 		Query      string
 		Site       string
-		Month      string
+		FromMonth  string
+		ToMonth    string
+		FromYears  []selectOption
+		FromMonths []selectOption
+		ToYears    []selectOption
+		ToMonths   []selectOption
 		Category   string
 		Feed       string
 		From       string
@@ -333,11 +335,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}{
 		Items: items, Sites: sites, Pages: pageNumbers, Total: total, TotalPages: totalPages,
 		Page: filter.Page, PageSize: filter.PageSize,
-		Query: filter.Query, Site: filter.SiteID, Month: month, Category: filter.Category,
+		Query: filter.Query, Site: filter.SiteID, FromMonth: fromMonth, ToMonth: toMonth,
+		Category: filter.Category,
 		Feed: filter.FeedID, From: filter.From, To: filter.To, HasPrev: filter.Page > 1,
 		HasNext: filter.Page*filter.PageSize < total,
-		PrevURL: pageURL(filter, month, filter.Page-1), NextURL: pageURL(filter, month, filter.Page+1),
+		PrevURL: pageURL(filter, fromMonth, toMonth, filter.Page-1), NextURL: pageURL(filter, fromMonth, toMonth, filter.Page+1),
 	}
+	data.FromYears, data.FromMonths, data.ToYears, data.ToMonths = s.monthOptions(fromMonth, toMonth)
 	if disk := s.diskUsage(); disk.OK {
 		data.DiskOK = true
 		data.DiskText = fmt.Sprintf("归档占用 %s · 磁盘可用 %s / %s",
@@ -388,9 +392,10 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 		ContentHTML template.HTML
 		Images      []resourceView
 		Attachments []resourceView
+		FirstSeenAt string
 		RenderedAt  string
 		RenderMS    string
-	}{Item: item, ContentHTML: s.safeContent(item)}
+	}{Item: item, ContentHTML: s.safeContent(item), FirstSeenAt: formatSeenAt(item.FirstSeenAt)}
 	for _, resource := range item.Resources {
 		view := resourceView{ID: resource.ID, Filename: resource.Filename, ByteSize: resource.ByteSize, URL: s.resourceURL(&resource, requestBase(r))}
 		if resource.Kind == "image" {
@@ -454,7 +459,7 @@ func requestBase(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-func (s *Server) indexMarkdown(r *http.Request, items []archive.ArticleSummary, total int, filter archive.ArticleFilter, month string) string {
+func (s *Server) indexMarkdown(r *http.Request, items []archive.ArticleSummary, total int, filter archive.ArticleFilter, fromMonth, toMonth string) string {
 	base := requestBase(r)
 	var b strings.Builder
 	b.WriteString("# SWJTU 新闻归档\n\n")
@@ -485,8 +490,11 @@ func (s *Server) indexMarkdown(r *http.Request, items []archive.ArticleSummary, 
 		if filter.SiteID != "" {
 			values.Set("site", filter.SiteID)
 		}
-		if month != "" {
-			values.Set("month", month)
+		if fromMonth != "" {
+			values.Set("from_month", fromMonth)
+		}
+		if toMonth != "" {
+			values.Set("to_month", toMonth)
 		}
 		return base + "/?" + values.Encode()
 	}
@@ -524,6 +532,9 @@ func (s *Server) articleMarkdown(item *archive.ArticleRecord, base string) strin
 	}
 	if item.Editor != "" {
 		meta = append(meta, "编辑："+item.Editor)
+	}
+	if seen := formatSeenAt(item.FirstSeenAt); seen != "" {
+		meta = append(meta, "收录："+seen)
 	}
 	if len(meta) > 0 {
 		b.WriteString("> " + strings.Join(meta, " · ") + "\n\n")
@@ -636,6 +647,15 @@ func (s *Server) safeContent(item *archive.ArticleRecord) template.HTML {
 	return template.HTML(value)
 }
 
+// formatSeenAt renders an RFC3339 archive timestamp for display.
+func formatSeenAt(value string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return ""
+	}
+	return parsed.Local().Format("2006-01-02 15:04:05")
+}
+
 func safeLink(value string) bool {
 	value = strings.TrimSpace(value)
 	if strings.HasPrefix(value, "/") {
@@ -663,11 +683,113 @@ func articleFilter(r *http.Request) archive.ArticleFilter {
 		FeedID: query.Get("feed"), From: query.Get("from"), To: query.Get("to"),
 		Page: page, PageSize: pageSize,
 	}
-	if month := query.Get("month"); validMonth(month) {
-		filter.From = month + "-01"
-		filter.To = month + "-31"
+	if fromMonth, toMonth := monthRange(query); fromMonth != "" || toMonth != "" {
+		filter.From, filter.To = "", ""
+		if fromMonth != "" {
+			filter.From = fromMonth + "-01"
+		}
+		if toMonth != "" {
+			filter.To = toMonth + "-31"
+		}
 	}
 	return filter
+}
+
+// monthRange resolves the month-precision time range from the query. It
+// accepts the picker-friendly split parameters (from_year/from_mon,
+// to_year/to_mon), the combined from_month/to_month form, and the legacy
+// single "month" parameter, which maps to both ends of the range. A year
+// selected without a month covers that whole year.
+func monthRange(query url.Values) (string, string) {
+	if month := query.Get("month"); validMonth(month) {
+		return month, month
+	}
+	from, to := query.Get("from_month"), query.Get("to_month")
+	if !validMonth(from) {
+		from = combineYearMonth(query.Get("from_year"), query.Get("from_mon"), true)
+	}
+	if !validMonth(to) {
+		to = combineYearMonth(query.Get("to_year"), query.Get("to_mon"), false)
+	}
+	if from != "" && to != "" && from > to {
+		from, to = to, from
+	}
+	return from, to
+}
+
+func combineYearMonth(year, mon string, start bool) string {
+	y, err := strconv.Atoi(strings.TrimSpace(year))
+	if err != nil || y < 1990 || y > 2100 {
+		return ""
+	}
+	m, err := strconv.Atoi(strings.TrimSpace(mon))
+	if err != nil || m < 1 || m > 12 {
+		if start {
+			return fmt.Sprintf("%04d-01", y)
+		}
+		return fmt.Sprintf("%04d-12", y)
+	}
+	return fmt.Sprintf("%04d-%02d", y, m)
+}
+
+type selectOption struct {
+	Value    string
+	Label    string
+	Selected bool
+}
+
+// monthOptions builds the year/month dropdown options for the time-range
+// picker. The year span covers the archived range extended to the current
+// year; the leading "不限" option leaves that end unbounded.
+func (s *Server) monthOptions(fromMonth, toMonth string) (fromYears, fromMonths, toYears, toMonths []selectOption) {
+	loYear, hiYear := time.Now().Year(), time.Now().Year()
+	if lo, hi, err := s.store.MonthBounds(); err != nil {
+		log.Printf("archive index month bounds query failed: %v", err)
+	} else {
+		if y, ok := monthYear(lo); ok && y < loYear {
+			loYear = y
+		}
+		if y, ok := monthYear(hi); ok && y > hiYear {
+			hiYear = y
+		}
+	}
+	fromYear, fromMon := splitMonth(fromMonth)
+	toYear, toMon := splitMonth(toMonth)
+	return yearOptions(loYear, hiYear, fromYear), monthSelectOptions(fromMon),
+		yearOptions(loYear, hiYear, toYear), monthSelectOptions(toMon)
+}
+
+func monthYear(value string) (int, bool) {
+	if len(value) < 4 {
+		return 0, false
+	}
+	y, err := strconv.Atoi(value[:4])
+	return y, err == nil
+}
+
+func splitMonth(value string) (string, string) {
+	if !validMonth(value) {
+		return "", ""
+	}
+	return value[:4], strings.TrimLeft(value[5:7], "0")
+}
+
+func yearOptions(lo, hi int, selected string) []selectOption {
+	options := []selectOption{{Label: "不限", Selected: selected == ""}}
+	for y := hi; y >= lo; y-- {
+		value := strconv.Itoa(y)
+		options = append(options, selectOption{Value: value, Label: value + "年", Selected: value == selected})
+	}
+	return options
+}
+
+func monthSelectOptions(selected string) []selectOption {
+	options := []selectOption{{Label: "不限", Selected: selected == ""}}
+	for m := 1; m <= 12; m++ {
+		value := strconv.Itoa(m)
+		options = append(options, selectOption{Value: value, Label: value + "月", Selected: value == selected})
+	}
+	return options
 }
 
 // paginationNumbers returns a compact page range. Zero marks a visual gap.
@@ -711,7 +833,7 @@ func paginationNumbers(current, total, window int) []int {
 	return pages
 }
 
-func pageURL(filter archive.ArticleFilter, month string, page int) string {
+func pageURL(filter archive.ArticleFilter, fromMonth, toMonth string, page int) string {
 	values := url.Values{}
 	values.Set("page", strconv.Itoa(max(page, 1)))
 	if filter.Query != "" {
@@ -726,9 +848,13 @@ func pageURL(filter archive.ArticleFilter, month string, page int) string {
 	if filter.FeedID != "" {
 		values.Set("feed", filter.FeedID)
 	}
-	if month != "" {
-		values.Set("month", month)
-	} else {
+	if fromMonth != "" {
+		values.Set("from_month", fromMonth)
+	}
+	if toMonth != "" {
+		values.Set("to_month", toMonth)
+	}
+	if fromMonth == "" && toMonth == "" {
 		if filter.From != "" {
 			values.Set("from", filter.From)
 		}
@@ -904,8 +1030,14 @@ a:hover{text-decoration:underline}
 .site-list .count{margin-left:auto;color:var(--muted);font-size:12px;flex-shrink:0}
 .site-list a.active .count{color:var(--primary)}
 .month-form{display:flex;flex-direction:column;gap:8px}
-.month-form input[type=month]{padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13.5px;font-family:inherit;background:#fff;color:var(--text)}
-.month-form input[type=month]:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px #1a5fb41a}
+.month-form select{padding:7px 6px;border:1px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
+.month-form select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px #1a5fb41a}
+.month-range{display:flex;gap:8px}
+.month-range label{flex:1;display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.month-selects{display:flex;gap:6px}
+.month-selects select{flex:1;min-width:0}
+.site-search{width:100%;padding:7px 10px;margin-bottom:8px;border:1px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
+.site-search:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px #1a5fb41a}
 .btn{padding:8px 14px;border:0;border-radius:7px;background:var(--primary);color:#fff;font-size:13.5px;font-weight:600;cursor:pointer}
 .btn:hover{background:var(--primary-dark)}
 .clear-link{display:inline-block;margin-top:10px;font-size:12.5px}
@@ -957,26 +1089,30 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 <div class="layout">
 <aside class="sidebar">
 <div class="side-section"><div class="side-title">来源筛选</div>
+<input type="search" id="site-search" class="site-search" placeholder="搜索来源…" aria-label="搜索来源">
 <ul class="site-list">
-<li><a href="?{{if .Query}}q={{.Query}}&{{end}}{{if .Month}}month={{.Month}}{{end}}"{{if not .Site}} class="active"{{end}}><span>全部来源</span></a></li>
-{{range .Sites}}<li><a href="?site={{.SiteID}}{{if $.Query}}&q={{$.Query}}{{end}}{{if $.Month}}&month={{$.Month}}{{end}}"{{if .Active}} class="active"{{end}}><span>{{if .SiteName}}{{.SiteName}}{{else}}{{.SiteID}}{{end}}</span><span class="count">{{.Count}}</span></a></li>{{end}}
+<li><a href="?{{if .Query}}q={{.Query}}&{{end}}{{if .FromMonth}}from_month={{.FromMonth}}&{{end}}{{if .ToMonth}}to_month={{.ToMonth}}{{end}}"{{if not .Site}} class="active"{{end}}><span>全部来源</span></a></li>
+{{range .Sites}}<li><a href="?site={{.SiteID}}{{if $.Query}}&q={{$.Query}}{{end}}{{if $.FromMonth}}&from_month={{$.FromMonth}}{{end}}{{if $.ToMonth}}&to_month={{$.ToMonth}}{{end}}"{{if .Active}} class="active"{{end}}><span>{{if .SiteName}}{{.SiteName}}{{else}}{{.SiteID}}{{end}}</span><span class="count">{{.Count}}</span></a></li>{{end}}
 </ul></div>
 <div class="side-section"><div class="side-title">时间筛选</div>
 <form class="month-form" method="get">
 {{if .Query}}<input type="hidden" name="q" value="{{.Query}}">{{end}}{{if .Site}}<input type="hidden" name="site" value="{{.Site}}">{{end}}
-<input type="month" name="month" value="{{.Month}}">
-<button class="btn" type="submit">按月查看</button>
-</form>{{if or .Site .Month .Query}}<a class="clear-link" href="/">✕ 清除全部筛选</a>{{end}}</div>
+<div class="month-range">
+<label>从<span class="month-selects"><select name="from_year" aria-label="起始年份">{{range .FromYears}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select><select name="from_mon" aria-label="起始月份">{{range .FromMonths}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select></span></label>
+<label>至<span class="month-selects"><select name="to_year" aria-label="结束年份">{{range .ToYears}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select><select name="to_mon" aria-label="结束月份">{{range .ToMonths}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select></span></label>
+</div>
+<button class="btn" type="submit">按时间查看</button>
+</form>{{if or .Site .FromMonth .ToMonth .Query}}<a class="clear-link" href="/">✕ 清除全部筛选</a>{{end}}</div>
 </aside>
 <main>
 <form class="search" method="get">
-{{if .Site}}<input type="hidden" name="site" value="{{.Site}}">{{end}}{{if .Month}}<input type="hidden" name="month" value="{{.Month}}">{{end}}
-<input name="q" value="{{.Query}}" placeholder="搜索标题、正文、作者…">
+{{if .Site}}<input type="hidden" name="site" value="{{.Site}}">{{end}}{{if .FromMonth}}<input type="hidden" name="from_month" value="{{.FromMonth}}">{{end}}{{if .ToMonth}}<input type="hidden" name="to_month" value="{{.ToMonth}}">{{end}}
+<input name="q" value="{{.Query}}" placeholder="搜索标题、正文、作者，或粘贴原文链接…">
 <button class="btn" type="submit">搜索</button>
 </form>
 <div class="result-meta">共 <b>{{.Total}}</b> 篇文章
-{{if .Site}}{{range .Sites}}{{if .Active}}<span class="filter-chip">{{.SiteName}}<a href="?{{if $.Query}}q={{$.Query}}&{{end}}{{if $.Month}}month={{$.Month}}{{end}}" title="移除来源筛选">✕</a></span>{{end}}{{end}}{{end}}
-{{if .Month}}<span class="filter-chip">{{.Month}}<a href="?{{if .Site}}site={{.Site}}&{{end}}{{if .Query}}q={{.Query}}{{end}}" title="移除时间筛选">✕</a></span>{{end}}
+{{if .Site}}{{range .Sites}}{{if .Active}}<span class="filter-chip">{{.SiteName}}<a href="?{{if $.Query}}q={{$.Query}}&{{end}}{{if $.FromMonth}}from_month={{$.FromMonth}}&{{end}}{{if $.ToMonth}}to_month={{$.ToMonth}}{{end}}" title="移除来源筛选">✕</a></span>{{end}}{{end}}{{end}}
+{{if or .FromMonth .ToMonth}}<span class="filter-chip">{{if eq .FromMonth .ToMonth}}{{.FromMonth}}{{else}}{{if .FromMonth}}{{.FromMonth}}{{else}}最早{{end}} ~ {{if .ToMonth}}{{.ToMonth}}{{else}}至今{{end}}{{end}}<a href="?{{if .Site}}site={{.Site}}&{{end}}{{if .Query}}q={{.Query}}{{end}}" title="移除时间筛选">✕</a></span>{{end}}
 </div>
 {{if .Items}}<div class="list">{{range .Items}}<article class="item">
 <h2><a href="/article/{{.ID}}">{{.Title}}</a></h2>
@@ -987,12 +1123,15 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 {{range .Pages}}{{if .Ellipsis}}<span class="ellipsis" aria-hidden="true">…</span>{{else if .Current}}<span class="current" aria-current="page">{{.Number}}</span>{{else}}<a href="{{.URL}}" aria-label="第 {{.Number}} 页">{{.Number}}</a>{{end}}{{end}}
 {{if .HasNext}}<a class="page-step" href="{{.NextURL}}" rel="next">下一页 →</a>{{end}}
 <form class="jump-form" method="get"><span>跳至</span>
-{{if .Query}}<input type="hidden" name="q" value="{{.Query}}">{{end}}{{if .Site}}<input type="hidden" name="site" value="{{.Site}}">{{end}}{{if .Month}}<input type="hidden" name="month" value="{{.Month}}">{{end}}{{if .Category}}<input type="hidden" name="category" value="{{.Category}}">{{end}}{{if .Feed}}<input type="hidden" name="feed" value="{{.Feed}}">{{end}}{{if not .Month}}{{if .From}}<input type="hidden" name="from" value="{{.From}}">{{end}}{{if .To}}<input type="hidden" name="to" value="{{.To}}">{{end}}{{end}}{{if ne .PageSize 20}}<input type="hidden" name="page_size" value="{{.PageSize}}">{{end}}
+{{if .Query}}<input type="hidden" name="q" value="{{.Query}}">{{end}}{{if .Site}}<input type="hidden" name="site" value="{{.Site}}">{{end}}{{if .FromMonth}}<input type="hidden" name="from_month" value="{{.FromMonth}}">{{end}}{{if .ToMonth}}<input type="hidden" name="to_month" value="{{.ToMonth}}">{{end}}{{if .Category}}<input type="hidden" name="category" value="{{.Category}}">{{end}}{{if .Feed}}<input type="hidden" name="feed" value="{{.Feed}}">{{end}}{{if and (not .FromMonth) (not .ToMonth)}}{{if .From}}<input type="hidden" name="from" value="{{.From}}">{{end}}{{if .To}}<input type="hidden" name="to" value="{{.To}}">{{end}}{{end}}{{if ne .PageSize 20}}<input type="hidden" name="page_size" value="{{.PageSize}}">{{end}}
 <input type="number" name="page" min="1" max="{{.TotalPages}}" value="{{.Page}}" aria-label="目标页码"><span>/ {{.TotalPages}} 页</span><button type="submit">跳转</button></form>
 </nav>{{end}}
 </main>
 </div>
 {{if .DiskOK}}<footer class="footer"><span>{{.DiskText}}</span></footer>{{end}}
+<script>
+(function(){var input=document.getElementById("site-search");if(!input)return;var items=document.querySelectorAll(".site-list li");input.addEventListener("input",function(){var kw=input.value.trim().toLowerCase();for(var i=0;i<items.length;i++){items[i].style.display=!kw||items[i].textContent.toLowerCase().indexOf(kw)>-1?"":"none"}})})();
+</script>
 </body></html>`))
 
 var mcpGuideTemplate = template.Must(template.New("mcp-guide").Parse(`<!doctype html>
@@ -1107,10 +1246,10 @@ h1{font-size:24px;line-height:1.45;text-align:center;margin:0 0 14px}
 </style></head><body>
 <header class="reading-bar"><div class="bar-inner"><div class="bar-main"><a class="back" href="/"><span aria-hidden="true">←</span> <span class="back-label">返回列表</span></a><span class="bar-source" title="{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}">来源：{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}</span><span class="bar-time">时间：{{if .Item.PublishedAt}}{{.Item.PublishedAt}}{{else}}未标注{{end}}</span><span class="bar-divider" aria-hidden="true"></span><span class="bar-title" title="{{.Item.Title}}">{{.Item.Title}}</span>{{if .Item.CanonicalURL}}<a class="original-button" href="{{.Item.CanonicalURL}}" target="_blank" rel="noopener">阅读原文 ↗</a>{{end}}</div><div class="bar-second"><span class="bar-second-label">标题</span><span class="bar-second-title" title="{{.Item.Title}}">{{.Item.Title}}</span></div></div></header>
 <div class="article-layout">
-<aside class="article-side" aria-label="文章信息"><a class="back side-back" href="/">← 返回列表</a><div class="side-card"><div class="side-info"><div class="side-field"><span class="side-label">来源</span><span class="side-value">{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}</span></div><div class="side-field"><span class="side-label">时间</span><span class="side-value">{{if .Item.PublishedAt}}{{.Item.PublishedAt}}{{else}}未标注{{end}}</span></div><div class="side-field"><span class="side-label">标题</span><span class="side-value side-title" title="{{.Item.Title}}">{{.Item.Title}}</span></div></div>{{if .Item.CanonicalURL}}<a class="original-button" href="{{.Item.CanonicalURL}}" target="_blank" rel="noopener">阅读原文 ↗</a>{{end}}{{if .Attachments}}<section class="side-resources"><h2>附件（{{len .Attachments}}）</h2><ul>{{range .Attachments}}<li><a href="{{.URL}}" download="{{.Filename}}" title="{{.Filename}}"><span aria-hidden="true">↓</span><span class="attachment-name">{{.Filename}}</span><span class="attachment-size">{{.ByteSize}} B</span></a></li>{{end}}</ul></section>{{end}}</div></aside>
+<aside class="article-side" aria-label="文章信息"><a class="back side-back" href="/">← 返回列表</a><div class="side-card"><div class="side-info"><div class="side-field"><span class="side-label">来源</span><span class="side-value">{{if .Item.Source}}{{.Item.Source}}{{else}}{{.Item.SiteName}}{{end}}</span></div><div class="side-field"><span class="side-label">时间</span><span class="side-value">{{if .Item.PublishedAt}}{{.Item.PublishedAt}}{{else}}未标注{{end}}</span></div>{{if .FirstSeenAt}}<div class="side-field"><span class="side-label">收录时间</span><span class="side-value">{{.FirstSeenAt}}</span></div>{{end}}<div class="side-field"><span class="side-label">标题</span><span class="side-value side-title" title="{{.Item.Title}}">{{.Item.Title}}</span></div></div>{{if .Item.CanonicalURL}}<a class="original-button" href="{{.Item.CanonicalURL}}" target="_blank" rel="noopener">阅读原文 ↗</a>{{end}}{{if .Attachments}}<section class="side-resources"><h2>附件（{{len .Attachments}}）</h2><ul>{{range .Attachments}}<li><a href="{{.URL}}" download="{{.Filename}}" title="{{.Filename}}"><span aria-hidden="true">↓</span><span class="attachment-name">{{.Filename}}</span><span class="attachment-size">{{.ByteSize}} B</span></a></li>{{end}}</ul></section>{{end}}</div></aside>
 <main class="paper">
 <h1>{{.Item.Title}}</h1>
-<div class="meta"><span class="badge">{{.Item.SiteName}}</span><span>{{.Item.PublishedAt}}</span>{{if .Item.Type}}<span class="dot"></span><span>类型：{{.Item.Type}}</span>{{end}}{{if .Item.Source}}<span class="dot"></span><span>来源：{{.Item.Source}}</span>{{end}}{{if .Item.Author}}<span class="dot"></span><span>作者：{{.Item.Author}}</span>{{end}}{{if .Item.Photographer}}<span class="dot"></span><span>摄影：{{.Item.Photographer}}</span>{{end}}{{if .Item.Editor}}<span class="dot"></span><span>编辑：{{.Item.Editor}}</span>{{end}}</div>
+<div class="meta"><span class="badge">{{.Item.SiteName}}</span><span>{{.Item.PublishedAt}}</span>{{if .Item.Type}}<span class="dot"></span><span>类型：{{.Item.Type}}</span>{{end}}{{if .Item.Source}}<span class="dot"></span><span>来源：{{.Item.Source}}</span>{{end}}{{if .Item.Author}}<span class="dot"></span><span>作者：{{.Item.Author}}</span>{{end}}{{if .Item.Photographer}}<span class="dot"></span><span>摄影：{{.Item.Photographer}}</span>{{end}}{{if .Item.Editor}}<span class="dot"></span><span>编辑：{{.Item.Editor}}</span>{{end}}{{if .FirstSeenAt}}<span class="dot"></span><span>收录：{{.FirstSeenAt}}</span>{{end}}</div>
 <div class="content">{{.ContentHTML}}</div>
 {{if .Attachments}}<section class="resources resources-inline"><h2>附件</h2><ul>{{range .Attachments}}<li><a href="{{.URL}}" download="{{.Filename}}">{{.Filename}}<span class="size">{{.ByteSize}} bytes</span></a></li>{{end}}</ul></section>{{end}}
 </main></div>

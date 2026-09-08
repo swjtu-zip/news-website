@@ -777,8 +777,8 @@ func articleWhere(filter ArticleFilter) (string, []any, string) {
 		search := strings.TrimSpace(filter.Query)
 		like := "%" + search + "%"
 		conditions = append(conditions, `(a.id IN (SELECT rowid FROM article_fts WHERE article_fts MATCH ?) OR
-a.title LIKE ? OR a.content LIKE ? OR a.source LIKE ? OR a.site_name LIKE ?)`)
-		args = append(args, makeFTSQuery(search), like, like, like, like)
+a.title LIKE ? OR a.content LIKE ? OR a.source LIKE ? OR a.site_name LIKE ? OR a.canonical_url LIKE ?)`)
+		args = append(args, makeFTSQuery(search), like, like, like, like, like)
 	}
 	if filter.SiteID != "" {
 		conditions = append(conditions, "a.site_id = ?")
@@ -1021,6 +1021,20 @@ func (s *Store) Stats() (Stats, error) {
 		return Stats{}, err
 	}
 	return stats, nil
+}
+
+// MonthBounds returns the earliest and latest year-month (YYYY-MM) covered by
+// archived articles, used to render the time-range picker options. Empty
+// results mean the archive has no dated articles yet.
+func (s *Store) MonthBounds() (string, string, error) {
+	var lo, hi sql.NullString
+	err := retrySQLiteBusy(func() error {
+		return s.db.QueryRow(`SELECT substr(MIN(published_at),1,7), substr(MAX(published_at),1,7) FROM articles WHERE published_at >= '1990'`).Scan(&lo, &hi)
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return lo.String, hi.String, nil
 }
 
 // SiteFacet is a per-source article count used to render filter sidebars.

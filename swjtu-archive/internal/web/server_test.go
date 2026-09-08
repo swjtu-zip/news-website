@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -172,6 +173,75 @@ func TestIndexIncludesMCPGuideAndPageJump(t *testing.T) {
 	}
 }
 
+func TestMonthRangeFilter(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	dates := []string{"2026-01-15", "2026-03-10", "2026-03-20", "2026-07-01"}
+	for i, date := range dates {
+		_, err := store.UpsertArticle(archive.ArticleInput{
+			Feed: feed, Item: sdk.NewsItem{Title: fmt.Sprintf("测试文章 %d", i), URL: fmt.Sprintf("https://news.swjtu.edu.cn/%d.htm", i)},
+			FetchedAt: time.Now(), Article: &sdk.Article{Title: fmt.Sprintf("测试文章 %d", i), Date: date, Content: "正文"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := NewServer(store).Handler()
+	count := func(path string) string {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s returned %d: %s", path, recorder.Code, recorder.Body.String())
+		}
+		matches := regexp.MustCompile(`共 <b>(\d+)</b> 篇文章`).FindStringSubmatch(recorder.Body.String())
+		if matches == nil {
+			t.Fatalf("%s did not render the result count", path)
+		}
+		return matches[1]
+	}
+
+	tests := []struct{ path, want string }{
+		{"/?from_month=2026-02&to_month=2026-06", "2"},
+		{"/?from_month=2026-06&to_month=2026-02", "2"}, // swapped bounds are normalized
+		{"/?to_month=2026-03", "3"},
+		{"/?from_month=2026-04", "1"},
+		{"/?month=2026-03", "2"}, // legacy single-month parameter
+		{"/?from_year=2026&from_mon=3&to_year=2026&to_mon=3", "2"}, // split year/month parameters
+		{"/?from_year=2026&from_mon=7", "1"},
+		{"/?to_year=2026&to_mon=1", "1"},
+		{"/?from_year=2026", "4"}, // year without month covers the whole year
+		{"/?from_month=2026-01&to_month=2026-12&site=news&q=%E6%B5%8B%E8%AF%95", "4"}, // combined filters
+		{"/?from_month=2026-01&to_month=2026-12&site=dqxy", "0"},
+	}
+	for _, test := range tests {
+		if got := count(test.path); got != test.want {
+			t.Fatalf("%s matched %s articles, want %s", test.path, got, test.want)
+		}
+	}
+
+	// The rendered filter form keeps every active condition for combined search.
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/?from_month=2026-02&to_month=2026-06&site=news&q=x", nil)
+	handler.ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	for _, fragment := range []string{
+		`name="from_year"`, `name="from_mon"`, `name="to_year"`, `name="to_mon"`,
+		`<option value="2026" selected>2026年</option>`, `<option value="2" selected>2月</option>`, `<option value="6" selected>6月</option>`,
+		`name="from_month" value="2026-02"`, `name="to_month" value="2026-06"`,
+		`name="site" value="news"`, `id="site-search"`, `2026-02 ~ 2026-06`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("index did not contain %q", fragment)
+		}
+	}
+}
+
 func TestIndexShowsDiskUsageFooter(t *testing.T) {
 	store, err := archive.Open(t.TempDir() + "/archive.db")
 	if err != nil {
@@ -290,6 +360,7 @@ func TestArticlePageHasResponsiveInfoAndAttachments(t *testing.T) {
 	body := recorder.Body.String()
 	for _, fragment := range []string{
 		`class="reading-bar"`, `来源：党委宣传部`, `时间：2026-08-30`, `阅读原文 ↗`,
+		`收录：` + time.Now().Local().Format("2006-01-02"), `收录时间`,
 		`class="article-side"`, `class="side-resources"`, `通知.pdf`,
 		`@media (orientation:portrait)`, `@media(min-width:1100px) and (orientation:landscape)`,
 		`class="footer"`, `服务器于 `, ` 提供，耗时 `, ` ms`,

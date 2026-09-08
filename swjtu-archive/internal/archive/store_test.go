@@ -108,6 +108,13 @@ func TestStoreArchivesAndSearchesArticle(t *testing.T) {
 	if total != 1 || len(items) != 1 || items[0].ID != articleID || items[0].PublishedAt != "2026-08-31 14:34:00" || items[0].Type != "交大要闻" {
 		t.Fatalf("unexpected search result: total=%d items=%+v", total, items)
 	}
+	items, total, err = store.FindArticles(ArticleFilter{Query: "https://news.swjtu.edu.cn/info/1/2.htm", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(items) != 1 || items[0].ID != articleID {
+		t.Fatalf("canonical URL search did not find the article: total=%d items=%+v", total, items)
+	}
 	full, err := store.GetArticle(articleID)
 	if err != nil || len(full.Resources) != 1 || full.Resources[0].ID != resourceID {
 		t.Fatalf("unexpected article: %+v (%v)", full, err)
