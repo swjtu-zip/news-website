@@ -103,13 +103,27 @@ func runServer(cfg config.Config, syncer *archive.Syncer, logger *log.Logger) {
 			logger.Printf("sync stopped: %v", err)
 		}
 	}
+	triggerSync := func() bool {
+		select {
+		case gate <- struct{}{}:
+		default:
+			return false
+		}
+		go func() {
+			defer func() { <-gate }()
+			if _, err := syncer.Sync(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Printf("sync stopped: %v", err)
+			}
+		}()
+		return true
+	}
 	if cfg.SyncOnStart {
 		go runSync()
 	}
 
-	server := &http.Server{Addr: cfg.Addr, Handler: web.NewServer(syncer.Store(), cfg.AssetBaseURL).Handler()}
-	// Keep the store owned by the syncer but expose it to the HTTP layer through
-	// this small accessor rather than duplicating database connections.
+	webServer := web.NewServer(syncer.Store(), cfg.AssetBaseURL)
+	webServer.SetSyncTrigger(triggerSync, cfg.SyncToken)
+	server := &http.Server{Addr: cfg.Addr, Handler: webServer.Handler()}
 	go func() {
 		logger.Printf("listening on %s", cfg.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

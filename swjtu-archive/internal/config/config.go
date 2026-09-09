@@ -28,6 +28,7 @@ type Config struct {
 	RequestGap        time.Duration
 	RefreshAfter      time.Duration
 	MaxResourceBytes  int64
+	SyncToken         string
 }
 
 // Load reads configuration from environment variables.
@@ -100,6 +101,7 @@ func Load() (Config, error) {
 		RequestGap:        gap,
 		RefreshAfter:      refreshAfter,
 		MaxResourceBytes:  maxBytes,
+		SyncToken:         env("SWJTU_ARCHIVE_SYNC_TOKEN", ""),
 	}, nil
 }
 

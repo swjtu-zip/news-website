@@ -100,7 +100,14 @@ func (u *recordingResourceUploader) Upload(_ context.Context, fullPath, _ string
 	return nil
 }
 
-func TestArchiveResourceRemovesLocalCopyAfterUpload(t *testing.T) {
+func (u *recordingResourceUploader) UploadBytes(_ context.Context, data []byte, localPath, _ string, _ string, _ string, _ string) error {
+	u.calls++
+	u.fullPath = localPath
+	u.contents = data
+	return nil
+}
+
+func TestArchiveResourceUploadsStraightToObjectStore(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "archive.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -143,8 +150,8 @@ func TestArchiveResourceRemovesLocalCopyAfterUpload(t *testing.T) {
 	if uploader.calls != 1 || string(uploader.contents) != payload {
 		t.Fatalf("uploader calls/content = %d/%q, want 1/%q", uploader.calls, uploader.contents, payload)
 	}
-	if _, err := os.Stat(uploader.fullPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("local resource path still exists: %v", err)
+	if _, err := os.Stat(filepath.Join(store.DataDir(), filepath.FromSlash(uploader.fullPath))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("resource touched the local disk: %v", err)
 	}
 
 	resource, err := store.ExistingResource(articleID, "image", server.URL+"/image.png")
@@ -236,3 +243,4 @@ func TestArticleHasAnyContent(t *testing.T) {
 		}
 	}
 }
+

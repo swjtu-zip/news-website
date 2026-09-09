@@ -5,6 +5,7 @@
 package r2
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -131,28 +132,28 @@ func PublicURL(baseURL, localPath string) string {
 // safely overwritten with the same bytes when a migration is resumed.
 // storageClass accepts STANDARD or STANDARD_IA; an empty value uses STANDARD.
 func (c *Client) Upload(ctx context.Context, fullPath, localPath, contentType, filename, kind, storageClass string) error {
-	key, ok := ObjectKey(c.prefix, localPath)
-	if !ok {
-		return fmt.Errorf("invalid resource path %q", localPath)
-	}
 	file, err := os.Open(fullPath)
 	if err != nil {
 		return fmt.Errorf("open resource: %w", err)
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	data, err := io.ReadAll(file)
 	if err != nil {
-		return fmt.Errorf("stat resource: %w", err)
+		return fmt.Errorf("read resource: %w", err)
 	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return fmt.Errorf("hash resource: %w", err)
+	return c.UploadBytes(ctx, data, localPath, contentType, filename, kind, storageClass)
+}
+
+// UploadBytes uploads an in-memory resource under the content-addressed
+// object key derived from localPath.
+func (c *Client) UploadBytes(ctx context.Context, data []byte, localPath, contentType, filename, kind, storageClass string) error {
+	key, ok := ObjectKey(c.prefix, localPath)
+	if !ok {
+		return fmt.Errorf("invalid resource path %q", localPath)
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind resource: %w", err)
-	}
+	hash := sha256.Sum256(data)
 	contentType = normalizeContentType(contentType, filename)
-	resp, err := c.do(ctx, http.MethodPut, key, file, info.Size(), hex.EncodeToString(hash.Sum(nil)), contentType, filename, kind, storageClass)
+	resp, err := c.do(ctx, http.MethodPut, key, io.NopCloser(bytes.NewReader(data)), int64(len(data)), hex.EncodeToString(hash[:]), contentType, filename, kind, storageClass)
 	if err != nil {
 		return err
 	}

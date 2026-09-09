@@ -252,12 +252,35 @@ func (s *Store) SaveResourceBody(body io.Reader, maxBytes int64, filename, conte
 		return "", "", size, fmt.Errorf("resource exceeds %d bytes", maxBytes)
 	}
 	hash = hex.EncodeToString(hasher.Sum(nil))
-	ext := resourceExtension(filename, contentType)
-	relative = filepath.ToSlash(filepath.Join("assets", hash[:2], hash+ext))
+	relative = resourceRelativePath(hash, filename, contentType)
 	if err := s.moveTemp(tmpName, relative); err != nil {
 		return "", "", size, err
 	}
 	return relative, hash, size, nil
+}
+
+// BufferResourceBody reads a downloaded resource into memory with a size
+// guard and returns the content-addressed archive path without writing
+// anything to disk. Sync uses it when an object-store uploader is configured
+// so assets go straight to the store.
+func BufferResourceBody(body io.Reader, maxBytes int64, filename, contentType string) (data []byte, relative, hash string, size int64, err error) {
+	limited := io.LimitReader(body, maxBytes+1)
+	data, err = io.ReadAll(limited)
+	if err != nil {
+		return nil, "", "", 0, fmt.Errorf("read resource body: %w", err)
+	}
+	size = int64(len(data))
+	if size > maxBytes {
+		return nil, "", "", size, fmt.Errorf("resource exceeds %d bytes", maxBytes)
+	}
+	sum := sha256.Sum256(data)
+	hash = hex.EncodeToString(sum[:])
+	return data, resourceRelativePath(hash, filename, contentType), hash, size, nil
+}
+
+func resourceRelativePath(hash, filename, contentType string) string {
+	ext := resourceExtension(filename, contentType)
+	return filepath.ToSlash(filepath.Join("assets", hash[:2], hash+ext))
 }
 
 func (s *Store) moveTemp(tmpName, relative string) error {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -368,5 +369,49 @@ func TestArticlePageHasResponsiveInfoAndAttachments(t *testing.T) {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("article page did not contain %q", fragment)
 		}
+	}
+}
+
+func TestSyncTriggerEndpoint(t *testing.T) {
+	store, err := archive.Open(filepath.Join(t.TempDir(), "archive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var runs int
+	server := NewServer(store)
+	server.SetSyncTrigger(func() bool { runs++; return runs == 1 }, "secret")
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sync/trigger", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token: got %d, want 401", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sync/trigger", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first trigger: got %d, want 202", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sync/trigger", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second trigger while running: got %d, want 409", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sync/trigger", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET trigger: got %d, want 405", rec.Code)
 	}
 }

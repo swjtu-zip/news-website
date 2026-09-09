@@ -28,12 +28,17 @@ type SyncOptions struct {
 	Logger           *log.Logger
 }
 
-// ResourceUploader receives a successfully archived local resource before it
-// is exposed as a successful resource record. Once the upload succeeds, the
-// local asset copy is removed; the content-addressed local_path remains in
-// SQLite so the public object-store URL can be derived deterministically.
+// ResourceUploader receives a successfully downloaded resource before it is
+// exposed as a successful resource record. Fresh downloads are handed over
+// in memory and never touch the host disk; Upload remains for legacy local
+// copies that predate the direct path. The content-addressed local_path
+// stays in SQLite so the public object-store URL can be derived
+// deterministically.
 type ResourceUploader interface {
 	Upload(ctx context.Context, fullPath, localPath, contentType, filename, kind, storageClass string) error
+	// UploadBytes uploads an in-memory resource so freshly downloaded assets
+	// go straight to the object store without touching the host disk.
+	UploadBytes(ctx context.Context, data []byte, localPath, contentType, filename, kind, storageClass string) error
 }
 
 // SyncResult reports work performed by one synchronization pass.
@@ -358,19 +363,22 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		if preferredName != "" {
 			filename = preferredName
 		}
-		localPath, hash, size, saveErr := s.store.SaveResourceBody(resource.Body, s.opts.MaxResourceBytes, filename, resource.ContentType)
-		resource.Body.Close()
-		if saveErr == nil && s.opts.ResourceUploader != nil {
-			storageClass := resourceStorageClass(kind, publishedAt, time.Now())
-			fullPath := filepath.Join(s.store.DataDir(), filepath.FromSlash(localPath))
-			if uploadErr := s.opts.ResourceUploader.Upload(ctx, fullPath, localPath, resource.ContentType, safeFilename(filename), kind, storageClass); uploadErr != nil {
-				saveErr = fmt.Errorf("上传资源到对象存储: %w", uploadErr)
-			} else if removeErr := os.Remove(fullPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				// The object is already durable remotely. Keep the resource
-				// record failed when cleanup itself fails so the operator can
-				// see that local storage is not yet reclaimable.
-				saveErr = fmt.Errorf("删除本地资源副本: %w", removeErr)
+		var localPath, hash string
+		var size int64
+		var saveErr error
+		if s.opts.ResourceUploader != nil {
+			// Straight to the object store: the asset never lands on the host
+			// disk, so the data volume only holds the database and raw pages.
+			var data []byte
+			data, localPath, hash, size, saveErr = BufferResourceBody(resource.Body, s.opts.MaxResourceBytes, filename, resource.ContentType)
+			resource.Body.Close()
+			if saveErr == nil {
+				storageClass := resourceStorageClass(kind, publishedAt, time.Now())
+				saveErr = s.opts.ResourceUploader.UploadBytes(ctx, data, localPath, resource.ContentType, safeFilename(filename), kind, storageClass)
 			}
+		} else {
+			localPath, hash, size, saveErr = s.store.SaveResourceBody(resource.Body, s.opts.MaxResourceBytes, filename, resource.ContentType)
+			resource.Body.Close()
 		}
 		if saveErr == nil {
 			_, err = s.store.UpsertResource(ResourceInput{

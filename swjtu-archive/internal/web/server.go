@@ -1,6 +1,7 @@
 package web
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,10 @@ type Server struct {
 	diskMu       sync.Mutex
 	diskAt       time.Time
 	diskStats    diskStats
+	// triggerSync starts a sync run in the serving process; nil until the
+	// daemon wires it up. It returns false when a run is already underway.
+	triggerSync func() bool
+	syncToken   string
 }
 
 // diskStats describes how much disk the archive occupies and how much space
@@ -49,6 +54,14 @@ func NewServer(store *archive.Store, assetBaseURLs ...string) *Server {
 		assetBaseURL = strings.TrimRight(strings.TrimSpace(assetBaseURLs[0]), "/")
 	}
 	return &Server{store: store, assetBaseURL: assetBaseURL}
+}
+
+// SetSyncTrigger lets the daemon expose in-process sync runs over HTTP so an
+// operator no longer needs to spawn a separate container for a manual crawl.
+// token is optional; when set, callers must present it as a Bearer token.
+func (s *Server) SetSyncTrigger(trigger func() bool, token string) {
+	s.triggerSync = trigger
+	s.syncToken = strings.TrimSpace(token)
 }
 
 type resourceView struct {
@@ -126,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/articles/", s.handleArticle)
 	mux.HandleFunc("/api/v1/resources/", s.handleResource)
 	mux.HandleFunc("/api/v1/sync/status", s.handleSyncStatus)
+	mux.HandleFunc("/api/v1/sync/trigger", s.handleSyncTrigger)
 	mux.HandleFunc("/assets/", s.handleResource)
 	mux.HandleFunc("/article/", s.handleArticlePage)
 	mux.HandleFunc("/help/mcp", s.handleMCPGuide)
@@ -249,6 +263,28 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"stats": stats, "latest_run": run})
+}
+
+// handleSyncTrigger starts a sync run inside the serving process. It replaces
+// the old "docker compose run sync" workflow for manual crawls.
+func (s *Server) handleSyncTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.triggerSync == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("sync trigger is not wired up"))
+		return
+	}
+	if s.syncToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.syncToken)) != 1 {
+		writeError(w, http.StatusUnauthorized, errors.New("missing or invalid sync token"))
+		return
+	}
+	if !s.triggerSync() {
+		writeError(w, http.StatusConflict, errors.New("sync already running"))
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
