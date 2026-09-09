@@ -21,6 +21,8 @@ go run ./cmd/swjtu-archive
 | `SWJTU_ARCHIVE_MAX_PAGES` | `1000` | 每个 feed 最多抓取页数 |
 | `SWJTU_ARCHIVE_REFRESH_AFTER` | `24h` | 文章详情与资源的刷新间隔 |
 | `SWJTU_ARCHIVE_SYNC_ON_START` | `true` | 是否启动时同步 |
+| `SWJTU_ARCHIVE_SYNC_TIMES` | 空 | 每日定时触发点（北京时间 `HH:MM`，逗号分隔），设置后覆盖 `INTERVAL` |
+| `SWJTU_ARCHIVE_SYNC_TOKEN` | 空 | 手动触发接口的 Bearer token；不设置则接口不要求鉴权 |
 | `SWJTU_ARCHIVE_ASSET_BASE_URL` | 空 | 资源公网基地址，例如 `https://oss.swjtu.zip/news-assets` |
 | `SWJTU_ARCHIVE_R2_ENDPOINT` | 空 | R2 S3 账号端点（不含 bucket 路径） |
 | `SWJTU_ARCHIVE_R2_BUCKET` | 空 | R2 bucket 名称 |
@@ -28,7 +30,15 @@ go run ./cmd/swjtu-archive
 | `SWJTU_ARCHIVE_R2_ACCESS_KEY_ID` | 空 | R2 S3 访问密钥 ID；与 secret 一起设置才启用上传 |
 | `SWJTU_ARCHIVE_R2_SECRET_ACCESS_KEY` | 空 | R2 S3 机密访问密钥 |
 
-启用 R2 后，新下载的资源会先写入本地临时归档并上传到对象存储，上传成功后删除本地 `assets` 副本，才记为成功资源；新上传资源统一使用 `STANDARD`。历史资源可用 `go run ./cmd/r2sync` 进行可恢复迁移，已存在对象会被跳过。若需要将指定前缀下的历史对象统一改为标准存储，可运行 `go run ./cmd/r2sync --change-storage-class STANDARD --change-prefix news-assets/`；工具会先检查对象类别，只对 `STANDARD_IA` 对象使用 R2 服务端 CopyObject 转换。确认迁移完成后可加 `--delete-local`，工具只会在 R2 对象已存在或本次上传成功后删除对应本地文件。
+启用 R2 后，新下载的资源直接在内存中计算内容寻址键并上传到对象存储，不再写入本地 `assets` 目录，上传成功才记为成功资源；新上传资源统一使用 `STANDARD`。历史资源可用 `go run ./cmd/r2sync` 进行可恢复迁移，已存在对象会被跳过。若需要将指定前缀下的历史对象统一改为标准存储，可运行 `go run ./cmd/r2sync --change-storage-class STANDARD --change-prefix news-assets/`；工具会先检查对象类别，只对 `STANDARD_IA` 对象使用 R2 服务端 CopyObject 转换。确认迁移完成后可加 `--delete-local`，工具只会在 R2 对象已存在或本次上传成功后删除对应本地文件。
+
+手动触发一次同步不再需要单独起容器，直接调用守护进程的接口即可：
+
+```bash
+curl -X POST -H "Authorization: Bearer $SWJTU_ARCHIVE_SYNC_TOKEN" http://localhost:8080/api/v1/sync/trigger
+```
+
+已有同步在跑时接口返回 409；未配置 token 时接口不鉴权，仅建议在内网使用。
 
 ## 访问
 
