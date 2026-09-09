@@ -224,6 +224,14 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 			result.Errors = append(result.Errors, fmt.Sprintf("抓取 %s: %v", item.URL, err))
 			continue
 		}
+		if !articleHasAnyContent(article) {
+			// Deleted source pages and external-link placeholders parse as an
+			// empty shell. Storing them produced blank archive pages that the
+			// next sync would happily fetch again, so skip them entirely.
+			result.Failures++
+			result.Errors = append(result.Errors, fmt.Sprintf("跳过空页面 %s: 无正文、图片或附件", item.URL))
+			continue
+		}
 		if article.Type == "" {
 			article.Type = item.Type
 		}
@@ -390,6 +398,20 @@ func articlePublishedAt(article *sdk.Article, item sdk.NewsItem) string {
 		return value
 	}
 	return strings.TrimSpace(item.Date)
+}
+
+// articleHasAnyContent reports whether a fetched article carries anything
+// worth archiving: text, HTML, images, or attachments. A detail page whose
+// parse yields none of these is a shell (deleted source page, external-link
+// placeholder) and is skipped instead of stored as a blank article.
+func articleHasAnyContent(article *sdk.Article) bool {
+	if article == nil {
+		return false
+	}
+	return strings.TrimSpace(article.Content) != "" ||
+		strings.TrimSpace(article.ContentHTML) != "" ||
+		len(article.Images) > 0 ||
+		len(article.Attachments) > 0
 }
 
 func resourceStorageClass(kind, publishedAt string, now time.Time) string {

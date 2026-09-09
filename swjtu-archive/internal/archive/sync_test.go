@@ -217,3 +217,22 @@ func TestArchiveExistingLocalResourceUploadsThenRemovesCopy(t *testing.T) {
 		t.Fatalf("existing local resource still exists: %v", err)
 	}
 }
+
+func TestArticleHasAnyContent(t *testing.T) {
+	if articleHasAnyContent(nil) {
+		t.Fatal("nil article has no content")
+	}
+	if articleHasAnyContent(&sdk.Article{Title: "只有标题"}) {
+		t.Fatal("title-only shell should be skipped")
+	}
+	for name, article := range map[string]*sdk.Article{
+		"text":       {Content: "正文"},
+		"html":       {ContentHTML: "<p>正文</p>"},
+		"image-only": {Images: []string{"https://example.com/a.png"}},
+		"attachment": {Attachments: []sdk.Attachment{{Name: "附件.pdf", URL: "https://example.com/a.pdf"}}},
+	} {
+		if !articleHasAnyContent(article) {
+			t.Fatalf("%s article should be archived", name)
+		}
+	}
+}
