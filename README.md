@@ -15,5 +15,5 @@ go run ./cmd/swjtu-archive
 教学信息项目拆成三个独立部署单元：
 
 - [`teach-crawler/`](teach-crawler/)：Go 编写的公开教师目录/主页采集器，输出 JSON 快照并提供 Dockerfile。
-- [`teach-api/`](teach-api/)：预留的 Go API 服务。
-- [`teach-web/`](teach-web/)：预留的前端项目。
+- [`teach-api/`](teach-api/)：Go + SQLite 公开数据 API，支持快照导入、筛选分页和 ETag 缓存。
+- [`teach-web/`](teach-web/)：可独立部署的静态前端，教师目录已接入并预留开课信息入口。

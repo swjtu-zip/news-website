@@ -1,0 +1,19 @@
+{
+  "fetchedAt": "2026-09-09T10:15:48Z",
+  "upstreamCommit": "70f53488b4533963d9cf2782d8f7f403a75fe6e5",
+  "upstreamCommittedAt": "2026-09-08T19:47:23Z",
+  "files": {
+    "courses.json": {
+      "bytes": 4030675,
+      "sha256": "5ed53a657707ae9414b682475fab5299792c2590e10b0055cb1d597430de77d9"
+    },
+    "reviews.json": {
+      "bytes": 12032417,
+      "sha256": "7d00cae3c2ffa406ec29792b179fe2dd5e63bd692f98e419fd02a5808e5298c4"
+    },
+    "stats.json": {
+      "bytes": 141953,
+      "sha256": "079f7b5accb59fb82db3d259660747561c7bb7d68bc9c7cb61a72e686ccf1c5b"
+    }
+  }
+}
