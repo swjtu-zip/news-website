@@ -105,7 +105,7 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 		go func() {
 			defer wg.Done()
 			for feed := range jobs {
-				feedResult, feedErr := s.syncFeed(ctx, feed, started)
+				feedResult, feedErr := s.syncFeedSafe(ctx, feed, started)
 				resultMu.Lock()
 				result.Feeds++
 				result.Articles += feedResult.Articles
@@ -166,6 +166,18 @@ type feedResult struct {
 	Resources int
 	Failures  int
 	Errors    []string
+}
+
+// syncFeedSafe runs syncFeed and converts a panic in a site adapter into a
+// feed-level failure. One malformed source page must not kill a multi-hour
+// run that still has dozens of feeds to archive.
+func (s *Syncer) syncFeedSafe(ctx context.Context, feed sdk.Feed, now time.Time) (result feedResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("adapter panic: %v", recovered)
+		}
+	}()
+	return s.syncFeed(ctx, feed, now)
 }
 
 func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (feedResult, error) {
