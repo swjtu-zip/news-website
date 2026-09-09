@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#FFF6EA">
+    <meta name="api-base" content="http://localhost:8080">
+    <title>扬华师课 · 教师与开课信息</title>
+    <link rel="stylesheet" href="/assets/styles.v6.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <a class="brand" href="/" aria-label="扬华师课首页">
+          <span class="brand-mark">扬</span>
+          <span class="brand-text">
+            <strong>扬华师课</strong>
+            <small>教师与课程信息站</small>
+          </span>
+        </a>
+        <nav class="site-nav" aria-label="主导航">
+          <a class="nav-link active" id="nav-teachers" href="/#teachers">教师目录</a>
+          <a class="nav-link" id="nav-courses" href="/courses">开课信息</a>
+          <a class="nav-link" id="nav-huoshui" href="/huoshui">活水评分</a>
+        </nav>
+      </header>
+
+      <main>
+        <div id="directory-view">
+          <section class="hero" aria-labelledby="hero-title">
+            <div class="hero-decor" aria-hidden="true">
+              <span class="decor-shape decor-circle"></span>
+              <span class="decor-shape decor-ring"></span>
+              <span class="decor-shape decor-cross"></span>
+              <span class="decor-shape decor-dot-a"></span>
+              <span class="decor-shape decor-dot-b"></span>
+            </div>
+            <div class="hero-copy">
+              <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>西南交通大学 · 教师目录</p>
+              <h1 id="hero-title">找老师,<br><em>也找课程。</em></h1>
+              <p class="hero-lede">查看教师主页、研究方向、联系方式和开课信息,一站式搞定。</p>
+              <div class="hero-links">
+                <a class="primary-button" href="#teachers">浏览教师目录 <span aria-hidden="true">↓</span></a>
+                <a class="text-link" href="/courses">看看开课信息 <span aria-hidden="true">→</span></a>
+              </div>
+            </div>
+            <div class="hero-board">
+              <span class="board-chip chip-a" aria-hidden="true">研究方向</span>
+              <span class="board-chip chip-b" aria-hidden="true">联系方式</span>
+              <span class="board-chip chip-c" aria-hidden="true">开课信息</span>
+              <span class="board-spark spark-a" aria-hidden="true">✦</span>
+              <span class="board-spark spark-b" aria-hidden="true">✦</span>
+              <div class="hero-stat" aria-label="教师数量">
+                <span class="stat-label">已收录教师</span>
+                <strong id="hero-count">—</strong>
+                <span class="stat-unit">位教师</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="tag-marquee" aria-hidden="true">
+            <div class="tag-track">
+              <span class="tag-item">交通运输</span><span class="tag-item">土木工程</span><span class="tag-item">机械工程</span><span class="tag-item">电气工程</span><span class="tag-item">计算机</span><span class="tag-item">材料科学</span><span class="tag-item">经济管理</span><span class="tag-item">外国语</span><span class="tag-item">数学</span><span class="tag-item">物理</span>
+              <span class="tag-item">交通运输</span><span class="tag-item">土木工程</span><span class="tag-item">机械工程</span><span class="tag-item">电气工程</span><span class="tag-item">计算机</span><span class="tag-item">材料科学</span><span class="tag-item">经济管理</span><span class="tag-item">外国语</span><span class="tag-item">数学</span><span class="tag-item">物理</span>
+            </div>
+          </div>
+
+          <section class="directory-layout" id="teachers" aria-labelledby="directory-title">
+            <div class="directory-main">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Directory</p>
+                  <h2 id="directory-title">教师目录</h2>
+                </div>
+                <p class="section-description">按姓名、学院或研究相关关键词查找</p>
+              </div>
+
+              <form class="filter-bar" id="filter-form" role="search">
+                <label class="search-field">
+                  <span class="search-icon" aria-hidden="true">⌕</span>
+                  <span class="visually-hidden">搜索教师</span>
+                  <input id="search-input" type="search" name="search" placeholder="搜索姓名、学院、职称…" autocomplete="off">
+                </label>
+                <label class="select-field">
+                  <span class="visually-hidden">按姓氏拼音首字母筛选</span>
+                  <select id="initial-select" name="initial">
+                    <option value="">全部首字母</option>
+                    <option value="a">A</option>
+                    <option value="b">B</option>
+                    <option value="c">C</option>
+                    <option value="d">D</option>
+                    <option value="e">E</option>
+                    <option value="f">F</option>
+                    <option value="g">G</option>
+                    <option value="h">H</option>
+                    <option value="i">I</option>
+                    <option value="j">J</option>
+                    <option value="k">K</option>
+                    <option value="l">L</option>
+                    <option value="m">M</option>
+                    <option value="n">N</option>
+                    <option value="o">O</option>
+                    <option value="p">P</option>
+                    <option value="q">Q</option>
+                    <option value="r">R</option>
+                    <option value="s">S</option>
+                    <option value="t">T</option>
+                    <option value="u">U</option>
+                    <option value="v">V</option>
+                    <option value="w">W</option>
+                    <option value="x">X</option>
+                    <option value="y">Y</option>
+                    <option value="z">Z</option>
+                  </select>
+                </label>
+                <button class="reset-button" id="reset-button" type="button">重置</button>
+              </form>
+
+              <div class="list-status" id="list-status" role="status" aria-live="polite">正在读取教师目录…</div>
+              <div class="teacher-grid" id="teacher-grid" aria-live="polite"></div>
+              <div class="empty-state hidden" id="empty-state">
+                <span class="empty-icon" aria-hidden="true">⌁</span>
+                <h3>没有找到匹配的教师</h3>
+                <p>换一个关键词,或清除筛选条件试试。</p>
+                <button class="secondary-button" id="empty-reset" type="button">清除筛选</button>
+              </div>
+              <div class="error-state hidden" id="error-state">
+                <span class="empty-icon" aria-hidden="true">✦</span>
+                <h3>目录暂时不可用</h3>
+                <p id="error-message">请稍后重试。</p>
+                <button class="secondary-button" id="retry-button" type="button">重新加载</button>
+              </div>
+              <nav class="pagination hidden" id="pagination" aria-label="教师目录分页">
+                <button class="page-button" id="previous-page" type="button" aria-label="上一页">←</button>
+                <span class="page-label" id="page-label">第 1 页</span>
+                <button class="page-button" id="next-page" type="button" aria-label="下一页">→</button>
+              </nav>
+            </div>
+
+            <aside class="directory-aside">
+              <section class="aside-card course-card" id="courses-card" aria-labelledby="courses-title">
+                <span class="coming-badge" id="aside-course-badge">2026 秋季学期</span>
+                <h2 id="courses-title">开课信息</h2>
+                <p>已收录选修课 <strong class="aside-course-count" id="aside-course-count">—</strong> 门,按学期、校区和星期浏览。</p>
+                <div class="course-preview" aria-hidden="true">
+                  <span>课程名称</span><span>授课教师</span><span>开课学期</span>
+                  <i></i><i></i><i></i>
+                </div>
+                <a class="course-card-link" href="/courses">浏览全部课程 <span aria-hidden="true">→</span></a>
+              </section>
+            </aside>
+          </section>
+        </div>
+
+        <div id="courses-view" class="hidden">
+          <section class="courses-browser" aria-labelledby="courses-browser-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Courses</p>
+                <h2 id="courses-browser-title">开课信息</h2>
+              </div>
+              <p class="section-description" id="courses-term">2026 秋季学期 · 选修课</p>
+            </div>
+
+            <form class="filter-bar" id="course-filter-form" role="search">
+              <label class="search-field">
+                <span class="search-icon" aria-hidden="true">⌕</span>
+                <span class="visually-hidden">搜索课程</span>
+                <input id="course-search-input" type="search" name="search" placeholder="搜索课程名、课程代码、教师…" autocomplete="off">
+              </label>
+              <label class="select-field">
+                <span class="visually-hidden">按校区筛选</span>
+                <select id="course-campus-select" name="campus">
+                  <option value="">全部校区</option>
+                  <option value="犀浦">犀浦</option>
+                  <option value="九里">九里</option>
+                  <option value="东部">东部</option>
+                </select>
+              </label>
+              <label class="select-field">
+                <span class="visually-hidden">按星期筛选</span>
+                <select id="course-weekday-select" name="weekday">
+                  <option value="">全部星期</option>
+                  <option value="星期一">星期一</option>
+                  <option value="星期二">星期二</option>
+                  <option value="星期三">星期三</option>
+                  <option value="星期四">星期四</option>
+                  <option value="星期五">星期五</option>
+                  <option value="星期六">星期六</option>
+                  <option value="星期日">星期日</option>
+                </select>
+              </label>
+              <button class="reset-button" id="course-reset-button" type="button">重置</button>
+            </form>
+
+            <div class="list-status" id="course-list-status" role="status" aria-live="polite">正在读取开课信息…</div>
+            <div class="course-list" id="course-list" aria-live="polite"></div>
+            <div class="empty-state hidden" id="course-empty-state">
+              <span class="empty-icon" aria-hidden="true">⌁</span>
+              <h3>没有找到匹配的课程</h3>
+              <p>换一个关键词,或清除筛选条件试试。</p>
+              <button class="secondary-button" id="course-empty-reset" type="button">清除筛选</button>
+            </div>
+            <div class="error-state hidden" id="course-error-state">
+              <span class="empty-icon" aria-hidden="true">✦</span>
+              <h3>开课信息暂时不可用</h3>
+              <p id="course-error-message">请稍后重试。</p>
+              <button class="secondary-button" id="course-retry-button" type="button">重新加载</button>
+            </div>
+            <nav class="pagination hidden" id="course-pagination" aria-label="开课信息分页">
+              <button class="page-button" id="course-previous-page" type="button" aria-label="上一页">←</button>
+              <span class="page-label" id="course-page-label">第 1 页</span>
+              <button class="page-button" id="course-next-page" type="button" aria-label="下一页">→</button>
+            </nav>
+          </section>
+        </div>
+
+        <div id="huoshui-view" class="hidden">
+          <section class="huoshui-browser" aria-labelledby="huoshui-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Huoshui</p>
+                <h2 id="huoshui-title">活水评分</h2>
+              </div>
+              <p class="section-description">数据来源:活水 <a class="huoshui-source-link" href="https://app.huoshui.org" target="_blank" rel="noopener noreferrer">app.huoshui.org</a> · 每日自动同步<br><span id="huoshui-updated">数据更新时间读取中…</span></p>
+            </div>
+
+            <form class="filter-bar" id="huoshui-filter-form" role="search">
+              <label class="search-field">
+                <span class="search-icon" aria-hidden="true">⌕</span>
+                <span class="visually-hidden">搜索课程或教师</span>
+                <input id="huoshui-search-input" type="search" name="search" placeholder="搜索课程名 / 教师…" autocomplete="off">
+              </label>
+              <label class="select-field">
+                <span class="visually-hidden">按院系筛选</span>
+                <select id="huoshui-dept-select" name="dept">
+                  <option value="">全部院系</option>
+                </select>
+              </label>
+              <label class="select-field">
+                <span class="visually-hidden">排序方式</span>
+                <select id="huoshui-sort-select" name="sort">
+                  <option value="reviews">按评价数</option>
+                  <option value="rating">按综合评分</option>
+                  <option value="rate3">按给分高低</option>
+                </select>
+              </label>
+              <button class="reset-button" id="huoshui-reset-button" type="button">重置</button>
+            </form>
+
+            <div class="list-status" id="huoshui-list-status" role="status" aria-live="polite">正在读取活水评分数据…</div>
+            <div class="huoshui-list" id="huoshui-list" aria-live="polite"></div>
+            <div class="empty-state hidden" id="huoshui-empty-state">
+              <span class="empty-icon" aria-hidden="true">⌁</span>
+              <h3>没有找到匹配的课程</h3>
+              <p>换一个关键词,或清除筛选条件试试。</p>
+              <button class="secondary-button" id="huoshui-empty-reset" type="button">清除筛选</button>
+            </div>
+            <div class="error-state hidden" id="huoshui-error-state">
+              <span class="empty-icon" aria-hidden="true">✦</span>
+              <h3>活水评分数据暂时不可用</h3>
+              <p id="huoshui-error-message">请稍后重试。</p>
+              <button class="secondary-button" id="huoshui-retry-button" type="button">重新加载</button>
+            </div>
+            <nav class="pagination hidden" id="huoshui-pagination" aria-label="活水评分分页">
+              <button class="page-button" id="huoshui-previous-page" type="button" aria-label="上一页">←</button>
+              <span class="page-label" id="huoshui-page-label">第 1 页</span>
+              <button class="page-button" id="huoshui-next-page" type="button" aria-label="下一页">→</button>
+            </nav>
+          </section>
+        </div>
+
+        <div class="huoshui-modal hidden" id="huoshui-modal" role="dialog" aria-modal="true" aria-labelledby="huoshui-modal-title">
+          <div class="huoshui-modal-overlay" id="huoshui-modal-overlay"></div>
+          <div class="huoshui-modal-panel">
+            <button class="huoshui-modal-close" id="huoshui-modal-close" type="button" aria-label="关闭">✕</button>
+            <div id="huoshui-modal-content"></div>
+          </div>
+        </div>
+
+        <section class="course-view hidden" id="course-view" aria-labelledby="course-page-title">
+          <div class="profile-loading" id="course-loading">正在读取课程信息…</div>
+          <div class="profile-error hidden" id="course-error">
+            <h2>课程信息暂时不可用</h2>
+            <p id="course-error-message-detail">请稍后重试。</p>
+            <a class="secondary-button" href="/courses">返回开课信息</a>
+          </div>
+          <article class="profile-page hidden" id="course-page">
+            <div class="profile-breadcrumb"><a href="/courses">开课信息</a><span aria-hidden="true">/</span><span id="course-breadcrumb-name">课程详情</span></div>
+            <div id="course-content"></div>
+          </article>
+        </section>
+
+        <section class="profile-view hidden" id="profile-view" aria-labelledby="profile-page-title">
+          <div class="profile-loading" id="profile-loading">正在读取教师资料…</div>
+          <div class="profile-error hidden" id="profile-error">
+            <h2>教师资料暂时不可用</h2>
+            <p id="profile-error-message">请稍后重试。</p>
+            <a class="secondary-button" href="/#teachers">返回教师目录</a>
+          </div>
+          <article class="profile-page hidden" id="profile-page">
+            <div class="profile-breadcrumb"><a href="/#teachers">教师目录</a><span aria-hidden="true">/</span><span id="profile-breadcrumb-name">教师主页</span></div>
+            <div id="profile-content"></div>
+          </article>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <span class="footer-brand">扬华师课 · 教师主页与开课信息</span>
+        <span id="dataset-updated">更新时间读取中</span>
+      </footer>
+    </div>
+
+    <noscript>
+      <div class="noscript-warning">此页面需要启用 JavaScript 才能读取教师目录。</div>
+    </noscript>
+    <script src="/assets/app.v7.js" defer></script>
+  </body>
+</html>
