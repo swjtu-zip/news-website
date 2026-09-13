@@ -1,2 +1,13 @@
 swjtu-archive/data/
 swjtu-archive/swjtu-archive
+
+# 服务器与部署信息,只留在本机
+AGENTS.md
+
+# 第三方用户评价数据与抓取快照(含个人信息),不入库
+teach-web/data/huoshui/
+collector-audits/
+
+# 含服务器路径与凭证文件位置的本地备份脚本
+scripts/db_backup_r2.py
+scripts/__pycache__/
