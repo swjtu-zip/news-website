@@ -6,14 +6,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -213,7 +216,31 @@ type CourseSummary struct {
 	Weekday     string      `json:"weekday,omitempty"`
 	Periods     string      `json:"periods,omitempty"`
 	Campus      string      `json:"campus,omitempty"`
+	Nature      string      `json:"nature,omitempty"`
+	Category    string      `json:"category,omitempty"`
 	Huoshui     *HuoshuiRef `json:"huoshui"`
+}
+
+// CourseGroupSummary is the list-row representation of one course: 不同老师、
+// 不同教学班的同一门课聚合成一行,避免“一门课只显示一个老师”的误导。
+// 列表不附带活水评分——评分因老师而异,聚合行上显示任何一个都不准确。
+type CourseGroupSummary struct {
+	CourseCode   string   `json:"course_code"`
+	CourseName   string   `json:"course_name"`
+	College      string   `json:"college,omitempty"`
+	Credit       float64  `json:"credit,omitempty"`
+	Term         string   `json:"term,omitempty"`
+	ClassCount   int      `json:"class_count"`
+	TeacherNames []string `json:"teacher_names,omitempty"`
+	Campuses     []string `json:"campuses,omitempty"`
+	Weekdays     []string `json:"weekdays,omitempty"`
+	Natures      []string `json:"natures,omitempty"`
+	Categories   []string `json:"categories,omitempty"`
+}
+
+type CourseGroupPage struct {
+	Data       []CourseGroupSummary `json:"data"`
+	Pagination Pagination           `json:"pagination"`
 }
 
 type CourseFilter struct {
@@ -223,11 +250,8 @@ type CourseFilter struct {
 	Campus   string
 	Weekday  string
 	College  string
-}
-
-type CoursePage struct {
-	Data       []CourseSummary `json:"data"`
-	Pagination Pagination      `json:"pagination"`
+	Category string
+	Term     string // 空 = 最新学期;"all" = 全部学期;其余按学期精确匹配
 }
 
 type DatasetMeta struct {
@@ -361,7 +385,7 @@ CREATE TABLE IF NOT EXISTS dataset_meta (
 	value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS courses (
-	id TEXT PRIMARY KEY NOT NULL,
+	id TEXT NOT NULL,
 	term TEXT NOT NULL DEFAULT '',
 	college TEXT NOT NULL DEFAULT '',
 	course_code TEXT NOT NULL DEFAULT '',
@@ -382,13 +406,16 @@ CREATE TABLE IF NOT EXISTS courses (
 	nature TEXT NOT NULL DEFAULT '',
 	category TEXT NOT NULL DEFAULT '',
 	remark TEXT NOT NULL DEFAULT '',
-	updated_at TEXT NOT NULL
+	shuffle_key INTEGER NOT NULL DEFAULT 0,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (course_code, id, term)
 );
 CREATE INDEX IF NOT EXISTS courses_teacher_id_idx ON courses(teacher_id);
 CREATE INDEX IF NOT EXISTS courses_name_idx ON courses(course_name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS courses_campus_idx ON courses(campus);
 CREATE INDEX IF NOT EXISTS courses_weekday_idx ON courses(weekday);
 CREATE INDEX IF NOT EXISTS courses_college_idx ON courses(college);
+CREATE INDEX IF NOT EXISTS courses_code_idx ON courses(course_code);
 CREATE TABLE IF NOT EXISTS huoshui_courses (
 	object_id TEXT PRIMARY KEY NOT NULL,
 	name TEXT NOT NULL,
@@ -431,8 +458,10 @@ CREATE TABLE IF NOT EXISTS huoshui_reviews (
 CREATE INDEX IF NOT EXISTS huoshui_reviews_course_idx ON huoshui_reviews(course_name, prof_name);
 CREATE INDEX IF NOT EXISTS huoshui_reviews_up_vote_idx ON huoshui_reviews(up_vote);
 CREATE TABLE IF NOT EXISTS huoshui_match (
-	registrar_course_id TEXT PRIMARY KEY NOT NULL,
-	huoshui_course_id TEXT NOT NULL REFERENCES huoshui_courses(object_id)
+	registrar_course_id TEXT NOT NULL,
+	term TEXT NOT NULL DEFAULT '',
+	huoshui_course_id TEXT NOT NULL REFERENCES huoshui_courses(object_id),
+	PRIMARY KEY (term, registrar_course_id)
 );
 CREATE INDEX IF NOT EXISTS huoshui_match_huoshui_idx ON huoshui_match(huoshui_course_id);`)
 	if err != nil {
@@ -440,6 +469,204 @@ CREATE INDEX IF NOT EXISTS huoshui_match_huoshui_idx ON huoshui_match(huoshui_co
 	}
 	if err := s.ensureTeacherColumns(); err != nil {
 		return err
+	}
+	if err := s.ensureCourseColumns(); err != nil {
+		return err
+	}
+	if err := s.migrateCourseSchema(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateCourseSchema upgrades an existing database to the composite course
+// primary key (course_code, id, term). teachId 每学期都会重新分配,单列主键
+// 无法跨学期共存;迁移后同一门课的历史学期可以并存。huoshui_match 的学期列
+// 同理,由于它由 courses 派生,直接重建后由导入流程重新填充。
+func (s *Store) migrateCourseSchema() error {
+	coursePK := make(map[string]int)
+	rows, err := s.db.Query(`PRAGMA table_info(courses)`)
+	if err != nil {
+		return fmt.Errorf("inspect courses primary key: %w", err)
+	}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan courses primary key: %w", err)
+		}
+		coursePK[name] = pk
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close courses primary key: %w", err)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin course schema migration: %w", err)
+	}
+	rollback := func() { _ = tx.Rollback() }
+	rebuiltCourses := false
+	if coursePK["course_code"] == 0 {
+		statements := []string{
+			`CREATE TABLE courses_migrated (
+	id TEXT NOT NULL,
+	term TEXT NOT NULL DEFAULT '',
+	college TEXT NOT NULL DEFAULT '',
+	course_code TEXT NOT NULL DEFAULT '',
+	course_name TEXT NOT NULL,
+	class_num TEXT NOT NULL DEFAULT '',
+	teacher_name TEXT NOT NULL,
+	teacher_title TEXT NOT NULL DEFAULT '',
+	teacher_id TEXT NOT NULL DEFAULT '',
+	credit REAL NOT NULL DEFAULT 0,
+	hours_total INTEGER NOT NULL DEFAULT 0,
+	hours_week INTEGER NOT NULL DEFAULT 0,
+	weeks TEXT NOT NULL DEFAULT '',
+	weekday TEXT NOT NULL DEFAULT '',
+	periods TEXT NOT NULL DEFAULT '',
+	campus TEXT NOT NULL DEFAULT '',
+	schedule_text TEXT NOT NULL DEFAULT '',
+	assessment TEXT NOT NULL DEFAULT '',
+	nature TEXT NOT NULL DEFAULT '',
+	category TEXT NOT NULL DEFAULT '',
+	remark TEXT NOT NULL DEFAULT '',
+	shuffle_key INTEGER NOT NULL DEFAULT 0,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (course_code, id, term)
+)`,
+			`INSERT INTO courses_migrated (
+	id, term, college, course_code, course_name, class_num,
+	teacher_name, teacher_title, teacher_id, credit, hours_total, hours_week,
+	weeks, weekday, periods, campus, schedule_text, assessment, nature,
+	category, remark, shuffle_key, updated_at
+) SELECT
+	id, term, college, course_code, course_name, class_num,
+	teacher_name, teacher_title, teacher_id, credit, hours_total, hours_week,
+	weeks, weekday, periods, campus, schedule_text, assessment, nature,
+	category, remark, shuffle_key, updated_at
+FROM courses`,
+			`DROP TABLE courses`,
+			`ALTER TABLE courses_migrated RENAME TO courses`,
+		}
+		for _, statement := range statements {
+			if _, err := tx.Exec(statement); err != nil {
+				rollback()
+				return fmt.Errorf("migrate courses primary key: %w", err)
+			}
+		}
+		rebuiltCourses = true
+	}
+	// 老库的 huoshui_match 没有 term 列时直接重建(内容可由课程数据派生)。
+	matchHasTerm := false
+	matchRows, err := tx.Query(`PRAGMA table_info(huoshui_match)`)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("inspect huoshui_match schema: %w", err)
+	}
+	for matchRows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := matchRows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			_ = matchRows.Close()
+			rollback()
+			return fmt.Errorf("scan huoshui_match schema: %w", err)
+		}
+		if name == "term" {
+			matchHasTerm = true
+		}
+	}
+	if err := matchRows.Close(); err != nil {
+		rollback()
+		return fmt.Errorf("close huoshui_match schema: %w", err)
+	}
+	rebuiltMatch := false
+	if !matchHasTerm {
+		statements := []string{
+			`DROP TABLE huoshui_match`,
+			`CREATE TABLE huoshui_match (
+	registrar_course_id TEXT NOT NULL,
+	term TEXT NOT NULL DEFAULT '',
+	huoshui_course_id TEXT NOT NULL REFERENCES huoshui_courses(object_id),
+	PRIMARY KEY (term, registrar_course_id)
+)`,
+			`CREATE INDEX IF NOT EXISTS huoshui_match_huoshui_idx ON huoshui_match(huoshui_course_id)`,
+		}
+		for _, statement := range statements {
+			if _, err := tx.Exec(statement); err != nil {
+				rollback()
+				return fmt.Errorf("migrate huoshui_match schema: %w", err)
+			}
+		}
+		rebuiltMatch = true
+	}
+	if rebuiltCourses {
+		indexes := []string{
+			`CREATE INDEX IF NOT EXISTS courses_teacher_id_idx ON courses(teacher_id)`,
+			`CREATE INDEX IF NOT EXISTS courses_name_idx ON courses(course_name COLLATE NOCASE)`,
+			`CREATE INDEX IF NOT EXISTS courses_campus_idx ON courses(campus)`,
+			`CREATE INDEX IF NOT EXISTS courses_weekday_idx ON courses(weekday)`,
+			`CREATE INDEX IF NOT EXISTS courses_college_idx ON courses(college)`,
+			`CREATE INDEX IF NOT EXISTS courses_code_idx ON courses(course_code)`,
+			`CREATE INDEX IF NOT EXISTS courses_shuffle_idx ON courses(shuffle_key)`,
+		}
+		for _, statement := range indexes {
+			if _, err := tx.Exec(statement); err != nil {
+				rollback()
+				return fmt.Errorf("recreate course indexes: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		rollback()
+		return fmt.Errorf("commit course schema migration: %w", err)
+	}
+	if rebuiltMatch {
+		// 匹配表被清空重建,立刻按现有课程与活水数据重新关联。
+		if err := s.rebuildHuoshuiMatchesIfPresent(context.Background()); err != nil {
+			return fmt.Errorf("rebuild huoshui matches after migration: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureCourseColumns keeps an existing public database forward-compatible
+// when the courses table gains another column.
+func (s *Store) ensureCourseColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(courses)`)
+	if err != nil {
+		return fmt.Errorf("inspect course schema: %w", err)
+	}
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan course schema: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("read course schema: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close course schema: %w", err)
+	}
+	if !columns["shuffle_key"] {
+		if _, err := s.db.Exec(`ALTER TABLE courses ADD COLUMN shuffle_key INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add course column shuffle_key: %w", err)
+		}
+	}
+	// 索引依赖 shuffle_key 列,必须在老库补列之后创建。
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS courses_shuffle_idx ON courses(shuffle_key)`); err != nil {
+		return fmt.Errorf("create course shuffle index: %w", err)
 	}
 	return nil
 }
@@ -710,18 +937,37 @@ func (s *Store) ImportCoursesBytes(ctx context.Context, contents []byte) error {
 	rollback := func() {
 		_ = tx.Rollback()
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM courses`); err != nil {
-		rollback()
-		return fmt.Errorf("replace courses: %w", err)
+	// 只替换本快照覆盖的学期,其他学期的归档数据保留。
+	snapshotTerms := make(map[string]struct{})
+	for _, course := range snapshot.Courses {
+		courseTerm := strings.TrimSpace(course.Term)
+		if courseTerm == "" {
+			courseTerm = term
+		}
+		snapshotTerms[courseTerm] = struct{}{}
 	}
+	for snapshotTerm := range snapshotTerms {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM courses WHERE term = ?`, snapshotTerm); err != nil {
+			rollback()
+			return fmt.Errorf("replace courses for term %q: %w", snapshotTerm, err)
+		}
+	}
+	// 顺序按快照内容做确定性洗牌:同一快照顺序稳定(分页不出错),数据更新后重洗。
+	shuffleKeys := make([]int, len(snapshot.Courses))
+	for index := range shuffleKeys {
+		shuffleKeys[index] = index
+	}
+	rng := rand.New(rand.NewSource(int64(binary.BigEndian.Uint64([]byte(version[:8])))))
+	rng.Shuffle(len(shuffleKeys), func(i, j int) { shuffleKeys[i], shuffleKeys[j] = shuffleKeys[j], shuffleKeys[i] })
+
 	statement, err := tx.PrepareContext(ctx, `
 INSERT INTO courses (
 	id, term, college, course_code, course_name, class_num,
 	teacher_name, teacher_title, teacher_id, credit, hours_total, hours_week,
 	weeks, weekday, periods, campus, schedule_text, assessment, nature,
-	category, remark, updated_at
+	category, remark, shuffle_key, updated_at
 ) VALUES (
-	?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+	?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )`)
 	if err != nil {
 		rollback()
@@ -753,7 +999,8 @@ INSERT INTO courses (
 			teacherIDs[teacherName], course.Credit, course.HoursTotal, course.HoursWeek,
 			sanitizePublicText(course.Weeks), sanitizePublicText(course.Weekday), sanitizePublicText(course.Periods),
 			sanitizePublicText(course.Campus), sanitizePublicText(course.ScheduleText), sanitizePublicText(course.Assessment),
-			sanitizePublicText(course.Nature), sanitizePublicText(course.Category), sanitizePublicText(course.Remark),
+			sanitizePublicText(course.Nature), canonicalizeCategory(course.Category), sanitizePublicText(course.Remark),
+			shuffleKeys[index],
 			importedAt,
 		); err != nil {
 			_ = statement.Close()
@@ -788,8 +1035,46 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil 
 		rollback()
 		return fmt.Errorf("commit courses import: %w", err)
 	}
+	if err := s.rebuildHuoshuiMatchesIfPresent(ctx); err != nil {
+		return fmt.Errorf("rebuild huoshui matches: %w", err)
+	}
 	if err := s.loadMeta(ctx); err != nil {
 		return fmt.Errorf("reload metadata: %w", err)
+	}
+	return nil
+}
+
+// rebuildHuoshuiMatchesIfPresent refreshes the registrar-course ↔ huoshui
+// links after a courses import; with no huoshui data imported it is a no-op.
+func (s *Store) rebuildHuoshuiMatchesIfPresent(ctx context.Context) error {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM huoshui_courses`).Scan(&count); err != nil {
+		return fmt.Errorf("check huoshui data: %w", err)
+	}
+	if count == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin huoshui match rebuild: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM huoshui_match`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("clear huoshui matches: %w", err)
+	}
+	matches, err := rebuildHuoshuiMatches(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO dataset_meta (key, value) VALUES ('huoshui_match_count', ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.Itoa(matches)); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("write huoshui match count: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit huoshui match rebuild: %w", err)
 	}
 	return nil
 }
@@ -829,7 +1114,7 @@ func (s *Store) teacherIDsByName(ctx context.Context) (map[string]string, error)
 	return owners, nil
 }
 
-func (s *Store) ListCourses(ctx context.Context, filter CourseFilter) (CoursePage, error) {
+func (s *Store) ListCourses(ctx context.Context, filter CourseFilter) (CourseGroupPage, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -849,52 +1134,131 @@ func (s *Store) ListCourses(ctx context.Context, filter CourseFilter) (CoursePag
 		sanitizeQuery(filter.Campus),
 		sanitizeQuery(filter.Weekday),
 		sanitizeQuery(filter.College),
+		sanitizeQuery(filter.Category),
+		sanitizeQuery(filter.Term),
 	)
+	// 课程代码为空的兜底按课程名分组(正常数据没有空代码,防御旧快照)。
+	const groupKey = `CASE WHEN course_code = '' THEN 'name:' || course_name ELSE 'code:' || course_code END`
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM courses WHERE `+where, args...).Scan(&total); err != nil {
-		return CoursePage{}, fmt.Errorf("count courses: %w", err)
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT `+groupKey+`) FROM courses WHERE `+where, args...).Scan(&total); err != nil {
+		return CourseGroupPage{}, fmt.Errorf("count courses: %w", err)
 	}
 	offset := (page - 1) * pageSize
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id, term, college, course_code, course_name, class_num,
-       teacher_name, teacher_id, credit, weekday, periods, campus
-FROM courses
+	// 先按课程代码分页(组内最小 shuffle_key 决定组的顺序,同一快照内稳定),
+	// 再取回这些课程的全部教学班做聚合。
+	codeRows, err := s.db.QueryContext(ctx, `
+SELECT `+groupKey+`, MIN(shuffle_key) FROM courses
 WHERE `+where+`
-ORDER BY course_name COLLATE NOCASE ASC, id ASC
+GROUP BY `+groupKey+`
+ORDER BY MIN(shuffle_key) ASC, `+groupKey+` ASC
 LIMIT ? OFFSET ?`, append(args, pageSize, offset)...)
 	if err != nil {
-		return CoursePage{}, fmt.Errorf("list courses: %w", err)
+		return CourseGroupPage{}, fmt.Errorf("list course codes: %w", err)
 	}
-	defer rows.Close()
-	data := make([]CourseSummary, 0, pageSize)
-	for rows.Next() {
-		course, err := scanCourseSummary(rows)
-		if err != nil {
-			return CoursePage{}, fmt.Errorf("scan course: %w", err)
+	keys := make([]string, 0, pageSize)
+	for codeRows.Next() {
+		var key string
+		var minShuffle int
+		if err := codeRows.Scan(&key, &minShuffle); err != nil {
+			_ = codeRows.Close()
+			return CourseGroupPage{}, fmt.Errorf("scan course code: %w", err)
 		}
-		data = append(data, course)
+		keys = append(keys, key)
 	}
-	if err := rows.Err(); err != nil {
-		return CoursePage{}, fmt.Errorf("iterate courses: %w", err)
+	if err := codeRows.Err(); err != nil {
+		_ = codeRows.Close()
+		return CourseGroupPage{}, fmt.Errorf("iterate course codes: %w", err)
 	}
-	if err := s.attachHuoshuiSummaries(ctx, data); err != nil {
-		return CoursePage{}, err
+	if err := codeRows.Close(); err != nil {
+		return CourseGroupPage{}, fmt.Errorf("close course codes: %w", err)
+	}
+
+	summaries := make([]CourseGroupSummary, 0, len(keys))
+	if len(keys) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+		keyArgs := make([]any, 0, len(keys))
+		for _, key := range keys {
+			keyArgs = append(keyArgs, key)
+		}
+		classRows, err := s.db.QueryContext(ctx, `
+SELECT `+groupKey+`, course_code, course_name, college, credit, term, teacher_name, campus, weekday, nature, category
+FROM courses WHERE `+groupKey+` IN (`+placeholders+`) AND `+where+`
+ORDER BY shuffle_key ASC, id ASC`, append(keyArgs, args...)...)
+		if err != nil {
+			return CourseGroupPage{}, fmt.Errorf("list grouped courses: %w", err)
+		}
+		defer classRows.Close()
+		byKey := make(map[string]*CourseGroupSummary, len(keys))
+		seen := make(map[string]map[string]bool, len(keys))
+		for classRows.Next() {
+			var key, code, name, college, term, teacher, campus, weekday, nature, category string
+			var credit float64
+			if err := classRows.Scan(&key, &code, &name, &college, &credit, &term, &teacher, &campus, &weekday, &nature, &category); err != nil {
+				return CourseGroupPage{}, fmt.Errorf("scan grouped course: %w", err)
+			}
+			group, ok := byKey[key]
+			if !ok {
+				group = &CourseGroupSummary{CourseCode: code, CourseName: name, College: college, Credit: credit, Term: term}
+				byKey[key] = group
+				seen[key] = make(map[string]bool)
+			}
+			group.ClassCount++
+			marks := seen[key]
+			if teacher != "" && !marks["t:"+teacher] {
+				marks["t:"+teacher] = true
+				group.TeacherNames = append(group.TeacherNames, teacher)
+			}
+			if campus != "" && !marks["c:"+campus] {
+				marks["c:"+campus] = true
+				group.Campuses = append(group.Campuses, campus)
+			}
+			if weekday != "" && !marks["w:"+weekday] {
+				marks["w:"+weekday] = true
+				group.Weekdays = append(group.Weekdays, weekday)
+			}
+			if nature != "" && !marks["n:"+nature] {
+				marks["n:"+nature] = true
+				group.Natures = append(group.Natures, nature)
+			}
+			// 班级名单("XX2026-01班")不是真分类,聚合行不展示。
+			for _, token := range strings.Split(category, ",") {
+				token = strings.TrimSpace(token)
+				if token == "" || strings.Contains(token, "班") || marks["g:"+token] {
+					continue
+				}
+				marks["g:"+token] = true
+				group.Categories = append(group.Categories, token)
+			}
+		}
+		if err := classRows.Err(); err != nil {
+			return CourseGroupPage{}, fmt.Errorf("iterate grouped courses: %w", err)
+		}
+		for _, key := range keys {
+			summaries = append(summaries, *byKey[key])
+		}
 	}
 	totalPages := 0
 	if total > 0 {
 		totalPages = (total + pageSize - 1) / pageSize
 	}
-	return CoursePage{
-		Data: data,
-		Pagination: Pagination{
-			Page: page, PageSize: pageSize, Total: total, TotalPages: totalPages,
-		},
+	return CourseGroupPage{
+		Data:       summaries,
+		Pagination: Pagination{Page: page, PageSize: pageSize, Total: total, TotalPages: totalPages},
 	}, nil
 }
 
-func courseWhere(search, campus, weekday, college string) (string, []any) {
+func courseWhere(search, campus, weekday, college, category, term string) (string, []any) {
 	conditions := []string{"1 = 1"}
-	args := make([]any, 0, 7)
+	args := make([]any, 0, 8)
+	switch term {
+	case "":
+		// 默认只看最新学期(导入时写入 dataset_meta 的 courses_term)。
+		conditions = append(conditions, `term = (SELECT value FROM dataset_meta WHERE key = 'courses_term')`)
+	case "all":
+	default:
+		conditions = append(conditions, `term = ?`)
+		args = append(args, term)
+	}
 	if search != "" {
 		pattern := likePattern(search)
 		conditions = append(conditions, `(course_name LIKE ? ESCAPE '\' OR course_code LIKE ? ESCAPE '\' OR teacher_name LIKE ? ESCAPE '\' OR college LIKE ? ESCAPE '\')`)
@@ -912,7 +1276,122 @@ func courseWhere(search, campus, weekday, college string) (string, []any) {
 		conditions = append(conditions, `college LIKE ? ESCAPE '\'`)
 		args = append(args, likePattern(college))
 	}
+	if category != "" {
+		// category 在导入时已规范化为逗号连接,直接按完整 token 匹配。
+		conditions = append(conditions, `(',' || category || ',') LIKE ? ESCAPE '\'`)
+		args = append(args, likePattern(","+category+","))
+	}
 	return strings.Join(conditions, " AND "), args
+}
+
+// protectedCategoryNames 是官方通识分类名,名字本身含有"、",
+// 规范化拆分时必须原样保留。
+var protectedCategoryNames = []string{
+	"交通、工程与创新世界",
+	"历史、文化与人文情怀",
+	"艺术体验与审美修养",
+	"自然科学与科学精神",
+	"社会科学与责任伦理",
+	"生态环境与生命关怀",
+}
+
+// canonicalizeCategory normalizes a raw category cell into comma-joined tokens:
+// enrolment class groups and real categories are separated by ",", "，", "、" or
+// "/" in the source data, with protectedCategoryNames kept intact.
+func canonicalizeCategory(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	// 受保护的完整分类名先换成占位符,避免被顿号拆开。
+	masked := raw
+	for index, name := range protectedCategoryNames {
+		if strings.Contains(masked, name) {
+			masked = strings.ReplaceAll(masked, name, fmt.Sprintf("\x00%d\x00", index))
+		}
+	}
+	tokens := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+	for _, token := range strings.FieldsFunc(masked, func(r rune) bool {
+		return r == ',' || r == '，' || r == '、' || r == '/'
+	}) {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		for index, name := range protectedCategoryNames {
+			token = strings.ReplaceAll(token, fmt.Sprintf("\x00%d\x00", index), name)
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		tokens = append(tokens, token)
+	}
+	return strings.Join(tokens, ",")
+}
+
+// ListCourseCategories returns the distinct category tokens across courses.
+// Class-group values like "半导体2026-01班" are enrolment lists, not real
+// categories, and are excluded so the list stays useful as a filter.
+func (s *Store) ListCourseCategories(ctx context.Context) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT category FROM courses WHERE category <> '' AND term = (SELECT value FROM dataset_meta WHERE key = 'courses_term')`)
+	if err != nil {
+		return nil, fmt.Errorf("list course categories: %w", err)
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{})
+	categories := make([]string, 0, 16)
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("scan course category: %w", err)
+		}
+		for _, token := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '，' }) {
+			token = strings.TrimSpace(token)
+			if token == "" || strings.Contains(token, "班") {
+				continue
+			}
+			if _, ok := seen[token]; ok {
+				continue
+			}
+			seen[token] = struct{}{}
+			categories = append(categories, token)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate course categories: %w", err)
+	}
+	sort.Strings(categories)
+	return categories, nil
+}
+
+// ListCourseTerms returns the distinct terms across courses, newest first.
+// Term strings like "2026-2027第1学期" sort chronologically as plain text.
+func (s *Store) ListCourseTerms(ctx context.Context) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT term FROM courses WHERE term <> '' ORDER BY term DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list course terms: %w", err)
+	}
+	defer rows.Close()
+	terms := make([]string, 0, 4)
+	for rows.Next() {
+		var term string
+		if err := rows.Scan(&term); err != nil {
+			return nil, fmt.Errorf("scan course term: %w", err)
+		}
+		terms = append(terms, term)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate course terms: %w", err)
+	}
+	return terms, nil
 }
 
 func (s *Store) GetCourse(ctx context.Context, id string) (Course, error) {
@@ -928,7 +1407,7 @@ SELECT id, term, college, course_code, course_name, class_num,
        teacher_name, teacher_title, teacher_id, credit, hours_total, hours_week,
        weeks, weekday, periods, campus, schedule_text, assessment, nature,
        category, remark
-FROM courses WHERE id = ?`, id)
+FROM courses WHERE id = ? ORDER BY term DESC LIMIT 1`, id)
 	course, err := scanCourse(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Course{}, ErrNotFound
@@ -940,6 +1419,63 @@ FROM courses WHERE id = ?`, id)
 		return Course{}, err
 	}
 	return course, nil
+}
+
+// CourseGroup aggregates every teaching class of one course (course_code)
+// across terms: 同一门课不同老师、不同学期的班都展示在一个页面上。
+type CourseGroup struct {
+	CourseCode string   `json:"course_code"`
+	CourseName string   `json:"course_name"`
+	College    string   `json:"college,omitempty"`
+	Credit     float64  `json:"credit,omitempty"`
+	Classes    []Course `json:"classes"`
+}
+
+// ListCourseClassesByCode returns all teaching classes of a course code,
+// newest term first.
+func (s *Store) ListCourseClassesByCode(ctx context.Context, code string) (CourseGroup, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return CourseGroup{}, ErrNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, term, college, course_code, course_name, class_num,
+       teacher_name, teacher_title, teacher_id, credit, hours_total, hours_week,
+       weeks, weekday, periods, campus, schedule_text, assessment, nature,
+       category, remark
+FROM courses WHERE course_code = ?
+ORDER BY term DESC, id ASC`, code)
+	if err != nil {
+		return CourseGroup{}, fmt.Errorf("list course classes: %w", err)
+	}
+	defer rows.Close()
+	classes := make([]Course, 0, 4)
+	for rows.Next() {
+		course, err := scanCourse(rows)
+		if err != nil {
+			return CourseGroup{}, fmt.Errorf("scan course class: %w", err)
+		}
+		classes = append(classes, course)
+	}
+	if err := rows.Err(); err != nil {
+		return CourseGroup{}, fmt.Errorf("iterate course classes: %w", err)
+	}
+	if len(classes) == 0 {
+		return CourseGroup{}, ErrNotFound
+	}
+	if err := s.attachHuoshuiCourses(ctx, classes); err != nil {
+		return CourseGroup{}, err
+	}
+	return CourseGroup{
+		CourseCode: code,
+		CourseName: classes[0].CourseName,
+		College:    classes[0].College,
+		Credit:     classes[0].Credit,
+		Classes:    classes,
+	}, nil
 }
 
 // ListTeacherCourses returns the teaching classes linked to a directory
@@ -954,7 +1490,7 @@ func (s *Store) ListTeacherCourses(ctx context.Context, teacherID string) ([]Cou
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, term, college, course_code, course_name, class_num,
-       teacher_name, teacher_id, credit, weekday, periods, campus
+       teacher_name, teacher_id, credit, weekday, periods, campus, nature, category
 FROM courses
 WHERE teacher_id = ?
 ORDER BY term DESC, course_name COLLATE NOCASE ASC, id ASC`, teacherID)
@@ -982,6 +1518,7 @@ func scanCourseSummary(row rowScanner) (CourseSummary, error) {
 		&course.ID, &course.Term, &course.College, &course.CourseCode,
 		&course.CourseName, &course.ClassNum, &course.TeacherName, &course.TeacherID,
 		&course.Credit, &course.Weekday, &course.Periods, &course.Campus,
+		&course.Nature, &course.Category,
 	); err != nil {
 		return CourseSummary{}, err
 	}

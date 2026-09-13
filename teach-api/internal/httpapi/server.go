@@ -20,6 +20,10 @@ import (
 
 const publicCacheControl = "public, max-age=60, s-maxage=300, stale-while-revalidate=86400"
 
+// CDN-Cache-Control 单独给边缘缓存(Cloudflare)的 TTL,与浏览器缓存时长解耦,
+// 和 swjtu-archive 的缓存分层方式保持一致。
+const publicCDNCacheControl = "public, max-age=300, stale-while-revalidate=86400"
+
 type Options struct {
 	AllowedOrigins []string
 	Logger         *log.Logger
@@ -52,6 +56,7 @@ func New(s *store.Store, options Options) *Server {
 	server.mux.HandleFunc("/api/v1/huoshui/meta", server.huoshuiMeta)
 	server.mux.HandleFunc("/api/v1/huoshui/courses", server.listHuoshuiCourses)
 	server.mux.HandleFunc("/api/v1/huoshui/courses/", server.getHuoshuiCourse)
+	server.mux.Handle("/mcp", newMCPHandler(s))
 	return server
 }
 
@@ -84,8 +89,36 @@ func (s *Server) Handler() http.Handler {
 		}
 		requestContext := context.WithValue(r.Context(), dataVersionContextKey{}, dataVersion)
 		requestContext = context.WithValue(requestContext, lastModifiedContextKey{}, lastModified)
-		s.mux.ServeHTTP(w, r.WithContext(requestContext))
+		s.mux.ServeHTTP(newServerTimingWriter(w, time.Now()), r.WithContext(requestContext))
 	})
+}
+
+// serverTimingWriter 在首个 WriteHeader 之前注入 Server-Timing,把
+// "从收到请求到开始写响应"的服务端耗时暴露给前端(性能面板读取)。
+type serverTimingWriter struct {
+	http.ResponseWriter
+	started time.Time
+	wrote   bool
+}
+
+func newServerTimingWriter(w http.ResponseWriter, started time.Time) *serverTimingWriter {
+	return &serverTimingWriter{ResponseWriter: w, started: started}
+}
+
+func (w *serverTimingWriter) WriteHeader(status int) {
+	if !w.wrote {
+		w.wrote = true
+		elapsed := float64(time.Since(w.started)) / float64(time.Millisecond)
+		w.Header().Set("Server-Timing", fmt.Sprintf("app;dur=%.2f", elapsed))
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *serverTimingWriter) Write(contents []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(contents)
 }
 
 func (s *Server) setCommonHeaders(w http.ResponseWriter, r *http.Request) {
@@ -95,9 +128,11 @@ func (s *Server) setCommonHeaders(w http.ResponseWriter, r *http.Request) {
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		if allowed := s.allowedOrigin(origin); allowed != "" {
 			w.Header().Set("Access-Control-Allow-Origin", allowed)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, If-None-Match")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, If-None-Match, Mcp-Protocol-Version")
 			w.Header().Set("Access-Control-Max-Age", "600")
+			// 跨源部署时也要让浏览器 JS 读得到缓存与计时相关响应头(性能面板)。
+			w.Header().Set("Access-Control-Expose-Headers", "Age, Cache-Control, CDN-Cache-Control, CF-Cache-Status, CF-Ray, Date, ETag, Last-Modified, Server-Timing")
 			w.Header().Add("Vary", "Origin")
 		}
 	}
@@ -249,7 +284,20 @@ func (s *Server) getCourse(w http.ResponseWriter, r *http.Request) {
 	if !getOnly(w, r) {
 		return
 	}
-	id, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/api/v1/courses/"))
+	remainder := strings.TrimPrefix(r.URL.Path, "/api/v1/courses/")
+	if remainder == "categories" {
+		s.listCourseCategories(w, r)
+		return
+	}
+	if remainder == "terms" {
+		s.listCourseTerms(w, r)
+		return
+	}
+	if strings.HasPrefix(remainder, "code/") {
+		s.getCourseByCode(w, r, strings.TrimPrefix(remainder, "code/"))
+		return
+	}
+	id, err := url.PathUnescape(remainder)
 	if err != nil || id == "" || strings.Contains(id, "/") || len(id) > 128 {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
@@ -265,6 +313,47 @@ func (s *Server) getCourse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, map[string]any{"data": course}, publicCacheControl)
+}
+
+// getCourseByCode 以课程代码为键返回同一门课的全部教学班(含历史学期),
+// 课程代码全局稳定,课程页与对外链接都以它为准。
+func (s *Server) getCourseByCode(w http.ResponseWriter, r *http.Request, rawCode string) {
+	code, err := url.PathUnescape(rawCode)
+	if err != nil || code == "" || strings.Contains(code, "/") || len(code) > 64 {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	group, err := s.store.ListCourseClassesByCode(r.Context(), code)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if err != nil {
+		s.logger.Printf("get course by code %q: %v", code, err)
+		writeError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	writeJSON(w, r, map[string]any{"data": group}, publicCacheControl)
+}
+
+func (s *Server) listCourseCategories(w http.ResponseWriter, r *http.Request) {
+	categories, err := s.store.ListCourseCategories(r.Context())
+	if err != nil {
+		s.logger.Printf("list course categories: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	writeJSON(w, r, map[string]any{"data": categories}, publicCacheControl)
+}
+
+func (s *Server) listCourseTerms(w http.ResponseWriter, r *http.Request) {
+	terms, err := s.store.ListCourseTerms(r.Context())
+	if err != nil {
+		s.logger.Printf("list course terms: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	writeJSON(w, r, map[string]any{"data": terms}, publicCacheControl)
 }
 
 func (s *Server) huoshuiMeta(w http.ResponseWriter, r *http.Request) {
@@ -382,8 +471,16 @@ func parseCourseFilter(r *http.Request) (store.CourseFilter, error) {
 	if len([]rune(college)) > 100 {
 		return store.CourseFilter{}, fmt.Errorf("college_too_long")
 	}
+	category := strings.TrimSpace(query.Get("category"))
+	if len([]rune(category)) > 50 {
+		return store.CourseFilter{}, fmt.Errorf("category_too_long")
+	}
+	term := strings.TrimSpace(query.Get("term"))
+	if len([]rune(term)) > 30 {
+		return store.CourseFilter{}, fmt.Errorf("term_too_long")
+	}
 	return store.CourseFilter{
-		Page: page, PageSize: pageSize, Search: search, Campus: campus, Weekday: weekday, College: college,
+		Page: page, PageSize: pageSize, Search: search, Campus: campus, Weekday: weekday, College: college, Category: category, Term: term,
 	}, nil
 }
 
@@ -427,6 +524,11 @@ func parseQueryInt(value string, minimum, maximum, fallback int) (int, error) {
 	return parsed, nil
 }
 
+// instanceTag 把 ETag 绑定到当前进程:重新部署后序列化可能变化,
+// 若只按数据集版本算 ETag,边缘缓存用 If-None-Match 回源会拿到 304,
+// 旧结构的响应体会被一直续期。
+var instanceTag = time.Now().UTC().Format("20060102150405")
+
 func writeJSON(w http.ResponseWriter, r *http.Request, value any, cacheControl string) {
 	contents, err := json.Marshal(value)
 	if err != nil {
@@ -437,9 +539,12 @@ func writeJSON(w http.ResponseWriter, r *http.Request, value any, cacheControl s
 	if requestStore := requestDataVersion(r); requestStore != "" {
 		metaVersion = requestStore
 	}
-	digest := sha256.Sum256([]byte(metaVersion + "\x00" + r.URL.RequestURI()))
+	digest := sha256.Sum256([]byte(metaVersion + "\x00" + instanceTag + "\x00" + r.URL.RequestURI()))
 	etag := `"` + hex.EncodeToString(digest[:12]) + `"`
 	w.Header().Set("Cache-Control", cacheControl)
+	if cacheControl == publicCacheControl {
+		w.Header().Set("CDN-Cache-Control", publicCDNCacheControl)
+	}
 	w.Header().Set("ETag", etag)
 	if lastModified := requestLastModified(r); lastModified != "" {
 		w.Header().Set("Last-Modified", lastModified)
@@ -488,6 +593,7 @@ func etagMatches(header, etag string) bool {
 
 func writeError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("CDN-Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `{"error":%q}`, code)

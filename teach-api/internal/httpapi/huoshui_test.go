@@ -31,8 +31,8 @@ func openHuoshuiAPI(t *testing.T) http.Handler {
 "schema_version":1,
 "term":"2026-2027第1学期",
 "courses":[
-  {"id":"A0001","course_name":"概率论","teacher_name":"赵春明","campus":"犀浦"},
-  {"id":"A0002","course_name":"冷门课程","teacher_name":"无名氏","campus":"九里"}
+  {"id":"A0001","course_code":"PROB0001","course_name":"概率论","teacher_name":"赵春明","campus":"犀浦"},
+  {"id":"A0002","course_code":"COLD0001","course_name":"冷门课程","teacher_name":"无名氏","campus":"九里"}
 ]}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +114,8 @@ func TestHuoshuiEndpoints(t *testing.T) {
 
 // TestRegistrarCoursesCarryHuoshuiRef checks the matched course exposes the
 // rating summary while the unmatched course keeps an explicit null field.
+// 课程列表按课程聚合后不附带评分(不同老师评分不同,聚合行显示会误导),
+// 评分只出现在教学班维度(by-code 聚合与单班详情)。
 func TestRegistrarCoursesCarryHuoshuiRef(t *testing.T) {
 	handler := openHuoshuiAPI(t)
 
@@ -123,12 +125,16 @@ func TestRegistrarCoursesCarryHuoshuiRef(t *testing.T) {
 	if listResponse.Code != http.StatusOK {
 		t.Fatalf("list status = %d", listResponse.Code)
 	}
-	body := listResponse.Body.String()
+	if body := listResponse.Body.String(); strings.Contains(body, "huoshui") {
+		t.Fatalf("grouped list must not carry huoshui refs: %s", body)
+	}
+
+	groupRequest := httptest.NewRequest(http.MethodGet, "/api/v1/courses/code/PROB0001", nil)
+	groupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(groupResponse, groupRequest)
+	body := groupResponse.Body.String()
 	if !strings.Contains(body, `"huoshui":{`) || !strings.Contains(body, `"objectId":"h1"`) {
 		t.Fatalf("matched course missing huoshui ref: %s", body)
-	}
-	if !strings.Contains(body, `"huoshui":null`) {
-		t.Fatalf("unmatched course missing explicit null: %s", body)
 	}
 
 	matchedDetail := httptest.NewRequest(http.MethodGet, "/api/v1/courses/A0001", nil)

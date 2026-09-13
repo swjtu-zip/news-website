@@ -861,6 +861,87 @@ type ArticleRecord struct {
 	Resources     []ResourceRecord `json:"resources,omitempty"`
 }
 
+// FindArticleIDByURL resolves a source-site URL to the archived article ID.
+// Small variations of the stored canonical URL (scheme, trailing slash,
+// fragment, query string) still match so pasted links resolve.
+func (s *Store) FindArticleIDByURL(raw string) (int64, error) {
+	candidates := urlLookupCandidates(raw)
+	if len(candidates) == 0 {
+		return 0, os.ErrNotExist
+	}
+	args := make([]any, len(candidates))
+	for i, candidate := range candidates {
+		args[i] = candidate
+	}
+	var id int64
+	err := retrySQLiteBusy(func() error {
+		return s.db.QueryRow(`SELECT id FROM articles WHERE canonical_url IN (`+
+			strings.TrimSuffix(strings.Repeat("?,", len(candidates)), ",")+`) ORDER BY id LIMIT 1`, args...).Scan(&id)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, os.ErrNotExist
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func urlLookupCandidates(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(value string) {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	add(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return out
+	}
+	bases := []url.URL{*parsed}
+	if parsed.Fragment != "" {
+		noFrag := *parsed
+		noFrag.Fragment = ""
+		bases = append(bases, noFrag)
+	}
+	last := bases[len(bases)-1]
+	if last.RawQuery != "" || last.ForceQuery {
+		noQuery := last
+		noQuery.RawQuery = ""
+		noQuery.ForceQuery = false
+		bases = append(bases, noQuery)
+	}
+	for _, base := range bases {
+		add(base.String())
+		swapped := base
+		switch swapped.Scheme {
+		case "http":
+			swapped.Scheme = "https"
+		case "https":
+			swapped.Scheme = "http"
+		default:
+			continue
+		}
+		add(swapped.String())
+		for _, variant := range []url.URL{base, swapped} {
+			if strings.HasSuffix(variant.Path, "/") {
+				variant.Path = strings.TrimSuffix(variant.Path, "/")
+			} else {
+				variant.Path += "/"
+			}
+			add(variant.String())
+		}
+	}
+	return out
+}
+
 func (s *Store) GetArticle(id int64) (*ArticleRecord, error) {
 	item := &ArticleRecord{}
 	err := retrySQLiteBusy(func() error {

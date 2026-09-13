@@ -168,7 +168,7 @@ func TestImportCoursesAndQueries(t *testing.T) {
 "term":"2026-2027第1学期",
 "courses":[
   {"id":"B3919","term":"2026-2027第1学期","college":"本科生院","course_code":"CFGE000114","course_name":"女性成长","class_num":"1","teacher_name":"杨爱华","teacher_title":"研究员","credit":2,"hours_total":32,"hours_week":2,"weeks":"1-17","weekday":"星期三","periods":"11-12","campus":"犀浦","schedule_text":"1-17周 星期三 11-12节","assessment":"考试周","nature":"选修","category":"通识课","remark":"周三晚上"},
-  {"id":"A0360","term":"2026-2027第1学期","college":"本科生院","course_code":"CFGE000415","course_name":"世界遗产与文明互鉴","class_num":"2","teacher_name":"王梅","teacher_title":"副教授","credit":2,"campus":"九里","weekday":"星期三","periods":"11-12","nature":"选修"},
+  {"id":"A0360","term":"2026-2027第1学期","college":"本科生院","course_code":"CFGE000415","course_name":"世界遗产与文明互鉴","class_num":"2","teacher_name":"王梅","teacher_title":"副教授","credit":2,"campus":"九里","weekday":"星期三","periods":"11-12","nature":"选修","category":"数学2025-01班,数学2025-02班"},
   {"id":"B0001","term":"2026-2027第1学期","college":"数学学院","course_code":"MATH000001","course_name":"数学漫谈","class_num":"1","teacher_name":"目录外老师","credit":1,"campus":"犀浦","weekday":"星期一","periods":"1-2","nature":"选修"}
 ]}`)
 	if err := database.ImportCoursesBytes(context.Background(), courses); err != nil {
@@ -193,6 +193,20 @@ func TestImportCoursesAndQueries(t *testing.T) {
 	}
 	if search.Pagination.Total != 1 || search.Data[0].CourseName != "女性成长" {
 		t.Fatalf("unexpected teacher search: %+v", search)
+	}
+	byCategory, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10, Category: "通识课"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byCategory.Pagination.Total != 1 || byCategory.Data[0].CourseCode != "CFGE000114" {
+		t.Fatalf("unexpected category filter: %+v", byCategory)
+	}
+	categories, err := database.ListCourseCategories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(categories) != 1 || categories[0] != "通识课" {
+		t.Fatalf("unexpected categories: %v", categories)
 	}
 
 	detail, err := database.GetCourse(context.Background(), "B3919")
@@ -228,12 +242,28 @@ func TestImportCoursesAndQueries(t *testing.T) {
 		t.Fatalf("unexpected teacher courses: %+v", teacherCourses)
 	}
 
-	// 重新导入同一批课程应当完全替换旧数据。
+	// 重新导入同一批课程应当完全替换旧数据,且洗牌顺序保持确定性。
+	before, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := database.ImportCoursesBytes(context.Background(), courses); err != nil {
 		t.Fatal(err)
 	}
 	if database.Meta().CourseCount != 3 {
 		t.Fatalf("reimport should replace, got %+v", database.Meta())
+	}
+	after, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Data) != len(after.Data) {
+		t.Fatalf("reimport changed course count: %d -> %d", len(before.Data), len(after.Data))
+	}
+	for index := range before.Data {
+		if before.Data[index].CourseCode != after.Data[index].CourseCode {
+			t.Fatalf("shuffle order changed on reimport at index %d: %s -> %s", index, before.Data[index].CourseCode, after.Data[index].CourseCode)
+		}
 	}
 }
 
@@ -255,5 +285,138 @@ func TestImportCoursesRejectsInvalid(t *testing.T) {
 	}
 	if database.Meta().CourseCount != 0 {
 		t.Fatalf("failed import must not leave partial data: %+v", database.Meta())
+	}
+}
+
+func TestImportCoursesCanonicalizesCategory(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "teach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	courses := []byte(`{"courses":[
+  {"id":"C1","course_name":"甲","teacher_name":"张三","category":"历史、文化与人文情怀、跨学科课程"},
+  {"id":"C2","course_name":"乙","teacher_name":"李四","category":"艺术体验与审美修养/交通、工程与创新世界"},
+  {"id":"C3","course_name":"丙","teacher_name":"王五","category":"交通、工程与创新世界"}
+]}`)
+	if err := database.ImportCoursesBytes(context.Background(), courses); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := database.GetCourse(context.Background(), "C1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Category != "历史、文化与人文情怀,跨学科课程" {
+		t.Fatalf("unexpected canonical category: %q", detail.Category)
+	}
+	categories, err := database.ListCourseCategories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(categories, "|")
+	for _, want := range []string{"历史、文化与人文情怀", "跨学科课程", "艺术体验与审美修养", "交通、工程与创新世界"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("categories missing %q: %v", want, categories)
+		}
+	}
+	for _, bad := range []string{"交通", "工程与创新世界", "历史", "文化与人文情怀"} {
+		for _, category := range categories {
+			if category == bad {
+				t.Fatalf("protected name was split: %v", categories)
+			}
+		}
+	}
+	page, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10, Category: "跨学科课程"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Pagination.Total != 1 || page.Data[0].CourseName != "甲" {
+		t.Fatalf("joined token should be filterable: %+v", page)
+	}
+	page, err = database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10, Category: "交通、工程与创新世界"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Pagination.Total != 2 {
+		t.Fatalf("protected name should match both C2 and C3: %+v", page)
+	}
+}
+
+func TestCourseGroupAndMultiTerm(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "teach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	term1 := []byte(`{"term":"2025-2026第2学期","courses":[
+  {"id":"B0001","term":"2025-2026第2学期","course_code":"MATH0001","course_name":"数学漫谈","teacher_name":"张三","credit":2},
+  {"id":"B0002","term":"2025-2026第2学期","course_code":"MATH0001","course_name":"数学漫谈","teacher_name":"李四","credit":2}
+]}`)
+	if err := database.ImportCoursesBytes(context.Background(), term1); err != nil {
+		t.Fatal(err)
+	}
+	// 新学期快照:teachId B0001 被分配给另一门课,旧学期数据必须保留。
+	term2 := []byte(`{"term":"2026-2027第1学期","courses":[
+  {"id":"B0001","term":"2026-2027第1学期","course_code":"PHYS0001","course_name":"物理趣谈","teacher_name":"王五","credit":3},
+  {"id":"B0003","term":"2026-2027第1学期","course_code":"MATH0001","course_name":"数学漫谈","teacher_name":"张三","credit":2}
+]}`)
+	if err := database.ImportCoursesBytes(context.Background(), term2); err != nil {
+		t.Fatal(err)
+	}
+
+	// 列表默认只看最新学期。
+	page, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Pagination.Total != 2 {
+		t.Fatalf("default term filter should show only latest term: %+v", page.Pagination)
+	}
+	all, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10, Term: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 4 个班聚成 2 门课(MATH0001 跨两个学期)。
+	if all.Pagination.Total != 2 {
+		t.Fatalf("term=all should show every term: %+v", all.Pagination)
+	}
+	old, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 10, Term: "2025-2026第2学期"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Pagination.Total != 1 || old.Data[0].ClassCount != 2 {
+		t.Fatalf("explicit old term should show archived classes: %+v", old.Pagination)
+	}
+
+	// teachId 跨学期重复时,详情取最新学期那门课。
+	latest, err := database.GetCourse(context.Background(), "B0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.CourseName != "物理趣谈" || latest.Term != "2026-2027第1学期" {
+		t.Fatalf("teachId should resolve to the latest term: %+v", latest)
+	}
+
+	// 课程代码聚合全部学期、全部教学班。
+	group, err := database.ListCourseClassesByCode(context.Background(), "MATH0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(group.Classes) != 3 || group.CourseName != "数学漫谈" {
+		t.Fatalf("course group should aggregate every class: %+v", group)
+	}
+	if group.Classes[0].Term != "2026-2027第1学期" {
+		t.Fatalf("classes should be newest term first: %+v", group.Classes[0])
+	}
+	if _, err := database.ListCourseClassesByCode(context.Background(), "NOPE0000"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+
+	terms, err := database.ListCourseTerms(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(terms) != 2 || terms[0] != "2026-2027第1学期" || terms[1] != "2025-2026第2学期" {
+		t.Fatalf("terms should be newest first: %v", terms)
 	}
 }

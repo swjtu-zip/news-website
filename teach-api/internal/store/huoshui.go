@@ -328,23 +328,24 @@ func rebuildHuoshuiMatches(ctx context.Context, tx *sql.Tx) (int, error) {
 		return 0, fmt.Errorf("close huoshui course matching rows: %w", err)
 	}
 
-	registrarRows, err := tx.QueryContext(ctx, `SELECT id, course_name, teacher_name FROM courses`)
+	registrarRows, err := tx.QueryContext(ctx, `SELECT id, course_name, teacher_name, term FROM courses`)
 	if err != nil {
 		return 0, fmt.Errorf("load registrar courses for matching: %w", err)
 	}
 	type matchRow struct {
 		registrarID string
+		term        string
 		huoshuiID   string
 	}
 	matches := make([]matchRow, 0, 256)
 	for registrarRows.Next() {
-		var id, name, teacher string
-		if err := registrarRows.Scan(&id, &name, &teacher); err != nil {
+		var id, name, teacher, term string
+		if err := registrarRows.Scan(&id, &name, &teacher, &term); err != nil {
 			_ = registrarRows.Close()
 			return 0, fmt.Errorf("scan registrar course for matching: %w", err)
 		}
 		if huoshuiID, ok := best[matchKey(name, teacher)]; ok {
-			matches = append(matches, matchRow{registrarID: id, huoshuiID: huoshuiID})
+			matches = append(matches, matchRow{registrarID: id, term: term, huoshuiID: huoshuiID})
 		}
 	}
 	if err := registrarRows.Err(); err != nil {
@@ -356,12 +357,12 @@ func rebuildHuoshuiMatches(ctx context.Context, tx *sql.Tx) (int, error) {
 	}
 
 	statement, err := tx.PrepareContext(ctx, `
-INSERT INTO huoshui_match (registrar_course_id, huoshui_course_id) VALUES (?, ?)`)
+INSERT INTO huoshui_match (registrar_course_id, term, huoshui_course_id) VALUES (?, ?, ?)`)
 	if err != nil {
 		return 0, fmt.Errorf("prepare huoshui match import: %w", err)
 	}
 	for _, match := range matches {
-		if _, err := statement.ExecContext(ctx, match.registrarID, match.huoshuiID); err != nil {
+		if _, err := statement.ExecContext(ctx, match.registrarID, match.term, match.huoshuiID); err != nil {
 			_ = statement.Close()
 			return 0, fmt.Errorf("insert huoshui match %q: %w", match.registrarID, err)
 		}
@@ -435,16 +436,39 @@ func (s *Store) attachHuoshuiSummaries(ctx context.Context, courses []CourseSumm
 	if len(courses) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(courses))
+	keys := make([]courseTermKey, 0, len(courses))
 	for _, course := range courses {
-		ids = append(ids, course.ID)
+		keys = append(keys, courseTermKey{id: course.ID, term: course.Term})
 	}
-	refs, err := s.huoshuiRefs(ctx, ids)
+	refs, err := s.huoshuiRefs(ctx, keys)
 	if err != nil {
 		return err
 	}
 	for index := range courses {
-		if ref, ok := refs[courses[index].ID]; ok {
+		if ref, ok := refs[courseTermKey{id: courses[index].ID, term: courses[index].Term}]; ok {
+			refCopy := ref
+			courses[index].Huoshui = &refCopy
+		}
+	}
+	return nil
+}
+
+// attachHuoshuiCourses fills the huoshui summary of every class in a course
+// group in one join query.
+func (s *Store) attachHuoshuiCourses(ctx context.Context, courses []Course) error {
+	if len(courses) == 0 {
+		return nil
+	}
+	keys := make([]courseTermKey, 0, len(courses))
+	for _, course := range courses {
+		keys = append(keys, courseTermKey{id: course.ID, term: course.Term})
+	}
+	refs, err := s.huoshuiRefs(ctx, keys)
+	if err != nil {
+		return err
+	}
+	for index := range courses {
+		if ref, ok := refs[courseTermKey{id: courses[index].ID, term: courses[index].Term}]; ok {
 			refCopy := ref
 			courses[index].Huoshui = &refCopy
 		}
@@ -453,47 +477,54 @@ func (s *Store) attachHuoshuiSummaries(ctx context.Context, courses []CourseSumm
 }
 
 func (s *Store) attachHuoshui(ctx context.Context, course *Course) error {
-	refs, err := s.huoshuiRefs(ctx, []string{course.ID})
+	refs, err := s.huoshuiRefs(ctx, []courseTermKey{{id: course.ID, term: course.Term}})
 	if err != nil {
 		return err
 	}
-	if ref, ok := refs[course.ID]; ok {
+	if ref, ok := refs[courseTermKey{id: course.ID, term: course.Term}]; ok {
 		refCopy := ref
 		course.Huoshui = &refCopy
 	}
 	return nil
 }
 
-func (s *Store) huoshuiRefs(ctx context.Context, registrarIDs []string) (map[string]HuoshuiRef, error) {
-	refs := make(map[string]HuoshuiRef, len(registrarIDs))
-	if len(registrarIDs) == 0 {
+// courseTermKey identifies one teaching class: teachId 每学期重新分配,
+// 只有 (教学班号, 学期) 组合才能唯一对应一门开课。
+type courseTermKey struct {
+	id   string
+	term string
+}
+
+func (s *Store) huoshuiRefs(ctx context.Context, keys []courseTermKey) (map[courseTermKey]HuoshuiRef, error) {
+	refs := make(map[courseTermKey]HuoshuiRef, len(keys))
+	if len(keys) == 0 {
 		return refs, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(registrarIDs)), ",")
-	args := make([]any, 0, len(registrarIDs))
-	for _, id := range registrarIDs {
-		args = append(args, id)
+	placeholders := strings.TrimSuffix(strings.Repeat("(?,?),", len(keys)), ",")
+	args := make([]any, 0, len(keys)*2)
+	for _, key := range keys {
+		args = append(args, key.id, key.term)
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT m.registrar_course_id, h.object_id, h.review_count, h.rate_overall,
+SELECT m.registrar_course_id, m.term, h.object_id, h.review_count, h.rate_overall,
        h.rate1, h.rate2, h.rate3, h.attendance_overall, h.exam_overall, h.bird_overall
 FROM huoshui_match m
 JOIN huoshui_courses h ON h.object_id = m.huoshui_course_id
-WHERE m.registrar_course_id IN (`+placeholders+`)`, args...)
+WHERE (m.registrar_course_id, m.term) IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load huoshui refs: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var registrarID string
+		var key courseTermKey
 		var ref HuoshuiRef
 		if err := rows.Scan(
-			&registrarID, &ref.ObjectID, &ref.ReviewCount, &ref.RateOverall,
+			&key.id, &key.term, &ref.ObjectID, &ref.ReviewCount, &ref.RateOverall,
 			&ref.Rate1, &ref.Rate2, &ref.Rate3, &ref.AttendanceOverall, &ref.ExamOverall, &ref.BirdOverall,
 		); err != nil {
 			return nil, fmt.Errorf("scan huoshui ref: %w", err)
 		}
-		refs[registrarID] = ref
+		refs[key] = ref
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate huoshui refs: %w", err)

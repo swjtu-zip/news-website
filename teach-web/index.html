@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#FFF6EA">
     <meta name="api-base" content="http://localhost:8080">
     <title>扬华师课 · 教师与开课信息</title>
-    <link rel="stylesheet" href="/assets/styles.v6.css">
+    <link rel="stylesheet" href="/assets/styles.v16.css">
   </head>
   <body>
     <div class="page-shell">
@@ -19,14 +19,14 @@
           </span>
         </a>
         <nav class="site-nav" aria-label="主导航">
-          <a class="nav-link active" id="nav-teachers" href="/#teachers">教师目录</a>
+          <a class="nav-link" id="nav-home" href="/">首页</a>
+          <a class="nav-link" id="nav-teachers" href="/teachers">教师目录</a>
           <a class="nav-link" id="nav-courses" href="/courses">开课信息</a>
-          <a class="nav-link" id="nav-huoshui" href="/huoshui">活水评分</a>
         </nav>
       </header>
 
       <main>
-        <div id="directory-view">
+        <div id="home-view" class="hidden">
           <section class="hero" aria-labelledby="hero-title">
             <div class="hero-decor" aria-hidden="true">
               <span class="decor-shape decor-circle"></span>
@@ -40,32 +40,37 @@
               <h1 id="hero-title">找老师,<br><em>也找课程。</em></h1>
               <p class="hero-lede">查看教师主页、研究方向、联系方式和开课信息,一站式搞定。</p>
               <div class="hero-links">
-                <a class="primary-button" href="#teachers">浏览教师目录 <span aria-hidden="true">↓</span></a>
+                <a class="primary-button" href="/teachers">浏览教师目录 <span aria-hidden="true">→</span></a>
                 <a class="text-link" href="/courses">看看开课信息 <span aria-hidden="true">→</span></a>
-              </div>
-            </div>
-            <div class="hero-board">
-              <span class="board-chip chip-a" aria-hidden="true">研究方向</span>
-              <span class="board-chip chip-b" aria-hidden="true">联系方式</span>
-              <span class="board-chip chip-c" aria-hidden="true">开课信息</span>
-              <span class="board-spark spark-a" aria-hidden="true">✦</span>
-              <span class="board-spark spark-b" aria-hidden="true">✦</span>
-              <div class="hero-stat" aria-label="教师数量">
-                <span class="stat-label">已收录教师</span>
-                <strong id="hero-count">—</strong>
-                <span class="stat-unit">位教师</span>
               </div>
             </div>
           </section>
 
-          <div class="tag-marquee" aria-hidden="true">
+          <div class="tag-marquee" aria-label="按学科浏览教师">
             <div class="tag-track">
-              <span class="tag-item">交通运输</span><span class="tag-item">土木工程</span><span class="tag-item">机械工程</span><span class="tag-item">电气工程</span><span class="tag-item">计算机</span><span class="tag-item">材料科学</span><span class="tag-item">经济管理</span><span class="tag-item">外国语</span><span class="tag-item">数学</span><span class="tag-item">物理</span>
-              <span class="tag-item">交通运输</span><span class="tag-item">土木工程</span><span class="tag-item">机械工程</span><span class="tag-item">电气工程</span><span class="tag-item">计算机</span><span class="tag-item">材料科学</span><span class="tag-item">经济管理</span><span class="tag-item">外国语</span><span class="tag-item">数学</span><span class="tag-item">物理</span>
+              <a class="tag-item" href="/teachers?search=%E4%BA%A4%E9%80%9A%E8%BF%90%E8%BE%93">交通运输</a><a class="tag-item" href="/teachers?search=%E5%9C%9F%E6%9C%A8%E5%B7%A5%E7%A8%8B">土木工程</a><a class="tag-item" href="/teachers?search=%E6%9C%BA%E6%A2%B0%E5%B7%A5%E7%A8%8B">机械工程</a><a class="tag-item" href="/teachers?search=%E7%94%B5%E6%B0%94%E5%B7%A5%E7%A8%8B">电气工程</a><a class="tag-item" href="/teachers?search=%E8%AE%A1%E7%AE%97%E6%9C%BA">计算机</a><a class="tag-item" href="/teachers?search=%E6%9D%90%E6%96%99%E7%A7%91%E5%AD%A6">材料科学</a><a class="tag-item" href="/teachers?search=%E7%BB%8F%E6%B5%8E%E7%AE%A1%E7%90%86">经济管理</a><a class="tag-item" href="/teachers?search=%E5%A4%96%E5%9B%BD%E8%AF%AD">外国语</a><a class="tag-item" href="/teachers?search=%E6%95%B0%E5%AD%A6">数学</a><a class="tag-item" href="/teachers?search=%E7%89%A9%E7%90%86">物理</a>
+              <a class="tag-item" href="/teachers?search=%E4%BA%A4%E9%80%9A%E8%BF%90%E8%BE%93" aria-hidden="true" tabindex="-1">交通运输</a><a class="tag-item" href="/teachers?search=%E5%9C%9F%E6%9C%A8%E5%B7%A5%E7%A8%8B" aria-hidden="true" tabindex="-1">土木工程</a><a class="tag-item" href="/teachers?search=%E6%9C%BA%E6%A2%B0%E5%B7%A5%E7%A8%8B" aria-hidden="true" tabindex="-1">机械工程</a><a class="tag-item" href="/teachers?search=%E7%94%B5%E6%B0%94%E5%B7%A5%E7%A8%8B" aria-hidden="true" tabindex="-1">电气工程</a><a class="tag-item" href="/teachers?search=%E8%AE%A1%E7%AE%97%E6%9C%BA" aria-hidden="true" tabindex="-1">计算机</a><a class="tag-item" href="/teachers?search=%E6%9D%90%E6%96%99%E7%A7%91%E5%AD%A6" aria-hidden="true" tabindex="-1">材料科学</a><a class="tag-item" href="/teachers?search=%E7%BB%8F%E6%B5%8E%E7%AE%A1%E7%90%86" aria-hidden="true" tabindex="-1">经济管理</a><a class="tag-item" href="/teachers?search=%E5%A4%96%E5%9B%BD%E8%AF%AD" aria-hidden="true" tabindex="-1">外国语</a><a class="tag-item" href="/teachers?search=%E6%95%B0%E5%AD%A6" aria-hidden="true" tabindex="-1">数学</a><a class="tag-item" href="/teachers?search=%E7%89%A9%E7%90%86" aria-hidden="true" tabindex="-1">物理</a>
             </div>
           </div>
 
-          <section class="directory-layout" id="teachers" aria-labelledby="directory-title">
+          <section class="home-entries" aria-label="站点入口">
+            <a class="home-entry-card home-entry-teachers" href="/teachers">
+              <span class="coming-badge">Directory</span>
+              <h2>教师目录</h2>
+              <p>已收录 <strong class="home-entry-count" id="home-teacher-count">—</strong> 位教师,按姓名、学院或研究方向查找。</p>
+              <span class="home-entry-link">进入教师目录 <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="home-entry-card home-entry-courses" href="/courses">
+              <span class="coming-badge" id="home-course-badge">2026 秋季学期</span>
+              <h2>开课信息</h2>
+              <p>已收录课程 <strong class="home-entry-count" id="home-course-count">—</strong> 门,匹配活水评分,按分类、校区和星期浏览。</p>
+              <span class="home-entry-link">浏览全部课程 <span aria-hidden="true">→</span></span>
+            </a>
+          </section>
+        </div>
+
+        <div id="teachers-view" class="hidden">
+          <section class="directory-layout" aria-labelledby="directory-title">
             <div class="directory-main">
               <div class="section-heading">
                 <div>
@@ -136,19 +141,6 @@
                 <button class="page-button" id="next-page" type="button" aria-label="下一页">→</button>
               </nav>
             </div>
-
-            <aside class="directory-aside">
-              <section class="aside-card course-card" id="courses-card" aria-labelledby="courses-title">
-                <span class="coming-badge" id="aside-course-badge">2026 秋季学期</span>
-                <h2 id="courses-title">开课信息</h2>
-                <p>已收录选修课 <strong class="aside-course-count" id="aside-course-count">—</strong> 门,按学期、校区和星期浏览。</p>
-                <div class="course-preview" aria-hidden="true">
-                  <span>课程名称</span><span>授课教师</span><span>开课学期</span>
-                  <i></i><i></i><i></i>
-                </div>
-                <a class="course-card-link" href="/courses">浏览全部课程 <span aria-hidden="true">→</span></a>
-              </section>
-            </aside>
           </section>
         </div>
 
@@ -159,7 +151,7 @@
                 <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Courses</p>
                 <h2 id="courses-browser-title">开课信息</h2>
               </div>
-              <p class="section-description" id="courses-term">2026 秋季学期 · 选修课</p>
+              <p class="section-description" id="courses-term">2026-2027第1学期</p>
             </div>
 
             <form class="filter-bar" id="course-filter-form" role="search">
@@ -190,6 +182,19 @@
                   <option value="星期日">星期日</option>
                 </select>
               </label>
+              <label class="select-field">
+                <span class="visually-hidden">按课程分类筛选</span>
+                <select id="course-category-select" name="category">
+                  <option value="">全部分类</option>
+                </select>
+              </label>
+              <label class="select-field">
+                <span class="visually-hidden">按学期筛选</span>
+                <select id="course-term-select" name="term">
+                  <option value="">最新学期</option>
+                  <option value="all">全部学期</option>
+                </select>
+              </label>
               <button class="reset-button" id="course-reset-button" type="button">重置</button>
             </form>
 
@@ -207,75 +212,8 @@
               <p id="course-error-message">请稍后重试。</p>
               <button class="secondary-button" id="course-retry-button" type="button">重新加载</button>
             </div>
-            <nav class="pagination hidden" id="course-pagination" aria-label="开课信息分页">
-              <button class="page-button" id="course-previous-page" type="button" aria-label="上一页">←</button>
-              <span class="page-label" id="course-page-label">第 1 页</span>
-              <button class="page-button" id="course-next-page" type="button" aria-label="下一页">→</button>
-            </nav>
+            <div class="list-status course-sentinel hidden" id="course-sentinel" aria-hidden="true">滚动加载更多…</div>
           </section>
-        </div>
-
-        <div id="huoshui-view" class="hidden">
-          <section class="huoshui-browser" aria-labelledby="huoshui-title">
-            <div class="section-heading">
-              <div>
-                <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Huoshui</p>
-                <h2 id="huoshui-title">活水评分</h2>
-              </div>
-              <p class="section-description">数据来源:活水 <a class="huoshui-source-link" href="https://app.huoshui.org" target="_blank" rel="noopener noreferrer">app.huoshui.org</a> · 每日自动同步<br><span id="huoshui-updated">数据更新时间读取中…</span></p>
-            </div>
-
-            <form class="filter-bar" id="huoshui-filter-form" role="search">
-              <label class="search-field">
-                <span class="search-icon" aria-hidden="true">⌕</span>
-                <span class="visually-hidden">搜索课程或教师</span>
-                <input id="huoshui-search-input" type="search" name="search" placeholder="搜索课程名 / 教师…" autocomplete="off">
-              </label>
-              <label class="select-field">
-                <span class="visually-hidden">按院系筛选</span>
-                <select id="huoshui-dept-select" name="dept">
-                  <option value="">全部院系</option>
-                </select>
-              </label>
-              <label class="select-field">
-                <span class="visually-hidden">排序方式</span>
-                <select id="huoshui-sort-select" name="sort">
-                  <option value="reviews">按评价数</option>
-                  <option value="rating">按综合评分</option>
-                  <option value="rate3">按给分高低</option>
-                </select>
-              </label>
-              <button class="reset-button" id="huoshui-reset-button" type="button">重置</button>
-            </form>
-
-            <div class="list-status" id="huoshui-list-status" role="status" aria-live="polite">正在读取活水评分数据…</div>
-            <div class="huoshui-list" id="huoshui-list" aria-live="polite"></div>
-            <div class="empty-state hidden" id="huoshui-empty-state">
-              <span class="empty-icon" aria-hidden="true">⌁</span>
-              <h3>没有找到匹配的课程</h3>
-              <p>换一个关键词,或清除筛选条件试试。</p>
-              <button class="secondary-button" id="huoshui-empty-reset" type="button">清除筛选</button>
-            </div>
-            <div class="error-state hidden" id="huoshui-error-state">
-              <span class="empty-icon" aria-hidden="true">✦</span>
-              <h3>活水评分数据暂时不可用</h3>
-              <p id="huoshui-error-message">请稍后重试。</p>
-              <button class="secondary-button" id="huoshui-retry-button" type="button">重新加载</button>
-            </div>
-            <nav class="pagination hidden" id="huoshui-pagination" aria-label="活水评分分页">
-              <button class="page-button" id="huoshui-previous-page" type="button" aria-label="上一页">←</button>
-              <span class="page-label" id="huoshui-page-label">第 1 页</span>
-              <button class="page-button" id="huoshui-next-page" type="button" aria-label="下一页">→</button>
-            </nav>
-          </section>
-        </div>
-
-        <div class="huoshui-modal hidden" id="huoshui-modal" role="dialog" aria-modal="true" aria-labelledby="huoshui-modal-title">
-          <div class="huoshui-modal-overlay" id="huoshui-modal-overlay"></div>
-          <div class="huoshui-modal-panel">
-            <button class="huoshui-modal-close" id="huoshui-modal-close" type="button" aria-label="关闭">✕</button>
-            <div id="huoshui-modal-content"></div>
-          </div>
         </div>
 
         <section class="course-view hidden" id="course-view" aria-labelledby="course-page-title">
@@ -296,24 +234,85 @@
           <div class="profile-error hidden" id="profile-error">
             <h2>教师资料暂时不可用</h2>
             <p id="profile-error-message">请稍后重试。</p>
-            <a class="secondary-button" href="/#teachers">返回教师目录</a>
+            <a class="secondary-button" href="/teachers">返回教师目录</a>
           </div>
           <article class="profile-page hidden" id="profile-page">
-            <div class="profile-breadcrumb"><a href="/#teachers">教师目录</a><span aria-hidden="true">/</span><span id="profile-breadcrumb-name">教师主页</span></div>
+            <div class="profile-breadcrumb"><a href="/teachers">教师目录</a><span aria-hidden="true">/</span><span id="profile-breadcrumb-name">教师主页</span></div>
             <div id="profile-content"></div>
           </article>
         </section>
+
+        <div id="open-data-view" class="hidden">
+          <section class="courses-browser" aria-labelledby="open-data-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Open Data</p>
+                <h2 id="open-data-title">数据公开</h2>
+              </div>
+              <p class="section-description">数据库每日自动快照,自由下载使用</p>
+            </div>
+
+            <section class="course-facts-card open-data-card">
+              <h3>数据库下载</h3>
+              <p>本站全部数据打包为 SQLite 数据库,每天凌晨自动快照并覆盖更新:</p>
+              <p><a class="primary-button" href="https://oss.swjtu.zip/database/teach/latest.db">下载 teach.db(SQLite,约 18 MB)</a></p>
+              <p>包含教师目录、开课信息(含历史学期)与活水课程评价的匹配结果。新闻归档站的数据库见 <a href="https://oss.swjtu.zip/database/news/latest.db">news latest.db</a>(约 1 GB)。</p>
+            </section>
+
+            <section class="course-facts-card open-data-card">
+              <h3>免责声明</h3>
+              <p>本站数据来自学校公开网页(教师目录、教务开课信息)及第三方课程评价平台,仅供学习交流使用。我们不对数据的正确性、完整性和时效性作任何承诺,一切信息以学校官方发布为准。</p>
+              <p><strong>已知问题:</strong>教师与课程的关联基于教师姓名匹配,重名、改名等情况可能导致关联错误,请谨慎参考。</p>
+            </section>
+
+            <section class="course-facts-card open-data-card">
+              <h3>错误反馈</h3>
+              <p>如果发现数据错误,欢迎来信指正:<a class="contact-link" href="mailto:teach-feedback@swjtu.zip">teach-feedback@swjtu.zip</a></p>
+            </section>
+          </section>
+        </div>
       </main>
 
       <footer class="site-footer">
         <span class="footer-brand">扬华师课 · 教师主页与开课信息</span>
         <span id="dataset-updated">更新时间读取中</span>
+        <a class="footer-perf-link" href="/open-data">数据公开</a>
+        <button class="footer-perf-link" id="perf-open" type="button">网站性能一览</button>
       </footer>
+    </div>
+
+    <div class="perf-modal hidden" id="perf-modal" role="dialog" aria-modal="true" aria-labelledby="perf-title">
+      <div class="perf-panel">
+        <div class="perf-head">
+          <h2 id="perf-title">网站性能一览</h2>
+          <button class="perf-close" id="perf-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <dl class="perf-grid">
+          <dt>前端页面提供方</dt>
+          <dd id="perf-front-source">—</dd>
+          <dt>前端交付时间（源站 → Cloudflare）</dt>
+          <dd id="perf-front-time">—</dd>
+          <dt>浏览器加载页面耗时</dt>
+          <dd id="perf-front-duration">—</dd>
+          <dt>API 结果提供方</dt>
+          <dd id="perf-api-source">—</dd>
+          <dt>API 交付时间（服务器 → Cloudflare）</dt>
+          <dd id="perf-api-time">—</dd>
+          <dt>API 服务端处理耗时（提供给 Cloudflare 那次）</dt>
+          <dd id="perf-api-server">—</dd>
+          <dt>浏览器获取 API 总时长</dt>
+          <dd id="perf-api-duration">—</dd>
+        </dl>
+        <div class="perf-actions">
+          <button class="secondary-button" id="perf-refresh" type="button">重新测量</button>
+        </div>
+        <p class="perf-note" id="perf-note"></p>
+      </div>
     </div>
 
     <noscript>
       <div class="noscript-warning">此页面需要启用 JavaScript 才能读取教师目录。</div>
     </noscript>
-    <script src="/assets/app.v7.js" defer></script>
+    <script src="/assets/app.v21.js" defer></script>
   </body>
 </html>

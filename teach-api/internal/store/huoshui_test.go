@@ -67,16 +67,13 @@ func TestImportHuoshuiMatchesRegistrarCourses(t *testing.T) {
 		t.Fatalf("matches = %d, want 3", stats.Matches)
 	}
 
-	page, err := database.ListCourses(context.Background(), CourseFilter{Page: 1, PageSize: 24})
-	if err != nil {
-		t.Fatal(err)
-	}
-	byID := make(map[string]CourseSummary, len(page.Data))
-	for _, course := range page.Data {
-		byID[course.ID] = course
-	}
+	// 按班逐一验证活水关联(ListCourses 已按课程聚合,不再附带评分)。
 	for _, id := range []string{"A0001", "A0002"} {
-		ref := byID[id].Huoshui
+		course, err := database.GetCourse(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := course.Huoshui
 		if ref == nil {
 			t.Fatalf("%s missing huoshui ref", id)
 		}
@@ -84,11 +81,19 @@ func TestImportHuoshuiMatchesRegistrarCourses(t *testing.T) {
 			t.Fatalf("%s huoshui ref = %+v, want h1/181/4.99", id, ref)
 		}
 	}
-	if byID["A0003"].Huoshui == nil || byID["A0003"].Huoshui.ObjectID != "h3" {
-		t.Fatalf("A0003 huoshui ref = %+v", byID["A0003"].Huoshui)
+	course, err := database.GetCourse(context.Background(), "A0003")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if byID["A0004"].Huoshui != nil {
-		t.Fatalf("A0004 must stay unmatched, got %+v", byID["A0004"].Huoshui)
+	if course.Huoshui == nil || course.Huoshui.ObjectID != "h3" {
+		t.Fatalf("A0003 huoshui ref = %+v", course.Huoshui)
+	}
+	course, err = database.GetCourse(context.Background(), "A0004")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if course.Huoshui != nil {
+		t.Fatalf("A0004 must stay unmatched, got %+v", course.Huoshui)
 	}
 
 	detail, err := database.GetCourse(context.Background(), "A0001")

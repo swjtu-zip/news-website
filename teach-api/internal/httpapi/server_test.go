@@ -133,8 +133,8 @@ func TestPublicCoursesAPI(t *testing.T) {
 "schema_version":1,
 "term":"2026-2027第1学期",
 "courses":[
-  {"id":"B3919","term":"2026-2027第1学期","college":"本科生院","course_code":"CFGE000114","course_name":"女性成长","teacher_name":"杨爱华","credit":2,"weekday":"星期三","periods":"11-12","campus":"犀浦","nature":"选修"},
-  {"id":"B0001","term":"2026-2027第1学期","college":"数学学院","course_code":"MATH000001","course_name":"数学漫谈","teacher_name":"目录外老师","credit":1,"weekday":"星期一","periods":"1-2","campus":"九里","nature":"选修"}
+  {"id":"B3919","term":"2026-2027第1学期","college":"本科生院","course_code":"CFGE000114","course_name":"女性成长","teacher_name":"杨爱华","credit":2,"weekday":"星期三","periods":"11-12","campus":"犀浦","nature":"选修","category":"社会科学与责任伦理,通识课"},
+  {"id":"B0001","term":"2026-2027第1学期","college":"数学学院","course_code":"MATH000001","course_name":"数学漫谈","teacher_name":"目录外老师","credit":1,"weekday":"星期一","periods":"1-2","campus":"九里","nature":"选修","category":"数学2025-01班"}
 ]}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -146,12 +146,59 @@ func TestPublicCoursesAPI(t *testing.T) {
 	if listResponse.Code != http.StatusOK {
 		t.Fatalf("list status = %d, body=%s", listResponse.Code, listResponse.Body.String())
 	}
-	var page store.CoursePage
+	var page store.CourseGroupPage
 	if err := json.Unmarshal(listResponse.Body.Bytes(), &page); err != nil {
 		t.Fatal(err)
 	}
-	if page.Pagination.Total != 1 || page.Data[0].ID != "B3919" || page.Data[0].TeacherID == "" {
+	if page.Pagination.Total != 1 || page.Data[0].CourseCode != "CFGE000114" || len(page.Data[0].TeacherNames) != 1 || page.Data[0].TeacherNames[0] != "杨爱华" {
 		t.Fatalf("unexpected course list: %+v", page)
+	}
+
+	categoryRequest := httptest.NewRequest(http.MethodGet, "/api/v1/courses?category=%E9%80%9A%E8%AF%86%E8%AF%BE", nil)
+	categoryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(categoryResponse, categoryRequest)
+	if categoryResponse.Code != http.StatusOK {
+		t.Fatalf("category filter status = %d", categoryResponse.Code)
+	}
+	var categoryPage store.CourseGroupPage
+	if err := json.Unmarshal(categoryResponse.Body.Bytes(), &categoryPage); err != nil {
+		t.Fatal(err)
+	}
+	if categoryPage.Pagination.Total != 1 || categoryPage.Data[0].CourseCode != "CFGE000114" {
+		t.Fatalf("unexpected category filter: %+v", categoryPage)
+	}
+
+	categoriesRequest := httptest.NewRequest(http.MethodGet, "/api/v1/courses/categories", nil)
+	categoriesResponse := httptest.NewRecorder()
+	handler.ServeHTTP(categoriesResponse, categoriesRequest)
+	if categoriesResponse.Code != http.StatusOK {
+		t.Fatalf("categories status = %d", categoriesResponse.Code)
+	}
+	var categories struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(categoriesResponse.Body.Bytes(), &categories); err != nil {
+		t.Fatal(err)
+	}
+	// "数学2025-01班" 是选课班级列表而非分类,不应出现在筛选选项里。
+	if len(categories.Data) != 2 || categories.Data[0] != "社会科学与责任伦理" || categories.Data[1] != "通识课" {
+		t.Fatalf("unexpected categories: %v", categories.Data)
+	}
+
+	termsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/courses/terms", nil)
+	termsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(termsResponse, termsRequest)
+	if termsResponse.Code != http.StatusOK {
+		t.Fatalf("terms status = %d", termsResponse.Code)
+	}
+	var terms struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(termsResponse.Body.Bytes(), &terms); err != nil {
+		t.Fatal(err)
+	}
+	if len(terms.Data) != 1 || terms.Data[0] != "2026-2027第1学期" {
+		t.Fatalf("unexpected terms: %v", terms.Data)
 	}
 
 	detailRequest := httptest.NewRequest(http.MethodGet, "/api/v1/courses/B0001", nil)
@@ -170,7 +217,20 @@ func TestPublicCoursesAPI(t *testing.T) {
 		t.Fatalf("unexpected course detail: %+v", detail.Data)
 	}
 
-	teacherID := page.Data[0].TeacherID
+	// 聚合列表不再带 teacher_id,从单班详情里取。
+	classRequest := httptest.NewRequest(http.MethodGet, "/api/v1/courses/B3919", nil)
+	classResponse := httptest.NewRecorder()
+	handler.ServeHTTP(classResponse, classRequest)
+	var classDetail struct {
+		Data store.Course `json:"data"`
+	}
+	if err := json.Unmarshal(classResponse.Body.Bytes(), &classDetail); err != nil {
+		t.Fatal(err)
+	}
+	teacherID := classDetail.Data.TeacherID
+	if teacherID == "" {
+		t.Fatalf("class detail missing teacher link: %+v", classDetail.Data)
+	}
 	byTeacher := httptest.NewRequest(http.MethodGet, "/api/v1/teachers/"+teacherID+"/courses", nil)
 	byTeacherResponse := httptest.NewRecorder()
 	handler.ServeHTTP(byTeacherResponse, byTeacher)
@@ -200,5 +260,30 @@ func TestPublicCoursesAPI(t *testing.T) {
 	handler.ServeHTTP(metaResponse, metaRequest)
 	if !strings.Contains(metaResponse.Body.String(), `"course_count":2`) {
 		t.Fatalf("meta missing course count: %s", metaResponse.Body.String())
+	}
+}
+
+func TestServerTimingAndExposedHeaders(t *testing.T) {
+	database, err := store.Open(t.TempDir() + "/teach.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	handler := New(database, Options{AllowedOrigins: []string{"https://web.example"}}).Handler()
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil)
+	request.Header.Set("Origin", "https://web.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	serverTiming := response.Header().Get("Server-Timing")
+	if !strings.HasPrefix(serverTiming, "app;dur=") {
+		t.Fatalf("missing Server-Timing header: %v", response.Header())
+	}
+	exposed := response.Header().Get("Access-Control-Expose-Headers")
+	for _, name := range []string{"Server-Timing", "CF-Cache-Status", "Date", "Last-Modified"} {
+		if !strings.Contains(exposed, name) {
+			t.Fatalf("Access-Control-Expose-Headers missing %s: %q", name, exposed)
+		}
 	}
 }

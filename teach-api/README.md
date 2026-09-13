@@ -4,7 +4,7 @@
 
 ## 本地运行
 
-需要 Go 1.24+ 和 CGO（SQLite 驱动使用 `go-sqlite3`）：
+需要 Go 1.25+ 和 CGO（SQLite 驱动使用 `go-sqlite3`）：
 
 ```bash
 cd teach-api
@@ -35,22 +35,45 @@ curl 'http://localhost:8080/api/v1/healthz'
 - `GET /api/v1/teachers`：分页、`search`、`initial`、`college` 筛选。
 - `GET /api/v1/teachers/{id}`：教师公开详情。
 - `GET /api/v1/teachers/{id}/courses`：该教师的授课班级列表。
-- `GET /api/v1/courses`：课程分页、`search`、`campus`、`weekday`、`college` 筛选。
-- `GET /api/v1/courses/{id}`：教学班详情,含匹配到的 `teacher_id`。
+- `GET /api/v1/courses`：按课程聚合分页(一行一门课,含班数、全部任课教师、校区/星期/性质/分类汇总;列表不附带活水评分——评分因老师而异,聚合行显示会误导)。`search`、`campus`、`weekday`、`college`、`category` 筛选,`term` 指定学期(默认最新学期,`all` 为全部学期)。默认按快照内容确定性洗牌排序(同一快照内翻页顺序稳定,数据更新后重洗),不按字母排序。
+- `GET /api/v1/courses/categories`：全部课程分类选项(供筛选下拉框使用)。
+- `GET /api/v1/courses/code/{course_code}`：同一门课的全部教学班(不同老师、不同学期),课程代码全局稳定,课程页与对外链接以它为准。
+- `GET /api/v1/courses/{id}`：教学班详情,含匹配到的 `teacher_id`。教学班号每学期重新分配,跨学期重复时返回最新学期的班;数据库以 (课程代码, 教学班号, 学期) 为联合主键,历史学期共存。
 - `GET /api/v1/meta`：数据版本、生成时间、记录数和课程数。
 - `GET /api/v1/healthz`：健康检查。
+- `POST /mcp`：MCP (Model Context Protocol) 端点,见下文。
 
 导入开课信息(先导入教师快照,课程按教师姓名关联目录):
 
 ```bash
 python3 scripts/xlsx_to_courses.py courses整理.xlsx courses.json
+# 或者从教务 CSV 导出转换(必修/限选清单 + 体育项目表,可与旧快照合并):
+python3 scripts/csv_to_courses.py 选修其他课程.csv 体育课程数据.csv courses.json [旧快照.json]
 go run ./cmd/teach-api \
   -db ./data/teach.db \
   -import-courses courses.json \
   -import-only
 ```
 
+课程重新导入后,若数据库里已有活水评分数据,会自动按 (课程名, 教师) 重建匹配关系。
+
 公开读接口返回 `Cache-Control: public`、`ETag` 和 `Last-Modified`。数据快照重新导入后版本自动变化，浏览器和 CDN 会重新验证旧缓存。默认 CORS 为 `*`；生产环境请通过 `-cors-origins https://你的前端域名` 收紧来源。
+
+## MCP 端点
+
+`POST /mcp` 以 MCP (Model Context Protocol) streamable HTTP 传输(无状态、JSON 响应)暴露同一套只读数据,供 AI 助手直接查询。工具列表:
+
+- `search_teachers`：按关键词/学院/首字母搜索教师,分页返回。
+- `get_teacher`：教师完整资料(简介、研究方向、公开联系方式)。
+- `list_teacher_courses`：某教师当前学期的授课班级。
+- `search_courses`：搜索开课信息,可按校区、星期、学院、课程分类筛选。
+- `list_course_categories`：列出全部课程分类选项。
+- `get_course`：教学班详情,含活水评分摘要。
+- `get_course_classes`：按课程代码获取一门课的全部教学班(跨老师、跨学期)。
+- `get_course_reviews`：活水课程的学生评分细项与匿名评价(参数为 `huoshui.objectId`)。
+- `dataset_meta`：数据集概况与更新时间。
+
+实现基于官方 `github.com/modelcontextprotocol/go-sdk`,与 REST API 共用同一个存储层;与 `teach-web` 联合部署时由前端 Nginx 把同一域名下的 `/mcp` 转发到 API 容器,公网入口即 `https://teach.swjtu.zip/mcp`。
 
 ## 活水评分数据同步
 

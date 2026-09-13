@@ -142,7 +142,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/sync/trigger", s.handleSyncTrigger)
 	mux.HandleFunc("/assets/", s.handleResource)
 	mux.HandleFunc("/article/", s.handleArticlePage)
+	mux.HandleFunc("/go", s.handleMirrorJump)
 	mux.HandleFunc("/help/mcp", s.handleMCPGuide)
+	mux.HandleFunc("/open-data", s.handleOpenData)
 	mux.Handle("/mcp", mcp.NewHandler(s.store, s.assetBaseURL))
 	mux.HandleFunc("/", s.handleIndex)
 	return withCache(withCORS(mux))
@@ -307,8 +309,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		// still failed after the bounded retry window.
 		facets = nil
 	}
-	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Add("Vary", "Accept")
+	w.Header().Set("Cache-Tag", "index")
 	fromMonth, toMonth := monthRange(r.URL.Query())
 	if prefersMarkdown(r) {
 		writeMarkdown(w, s.indexMarkdown(r, items, total, filter, fromMonth, toMonth))
@@ -366,6 +368,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		HasNext    bool
 		PrevURL    string
 		NextURL    string
+		MirrorMiss string
 		DiskOK     bool
 		DiskText   string
 	}{
@@ -373,9 +376,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Page: filter.Page, PageSize: filter.PageSize,
 		Query: filter.Query, Site: filter.SiteID, FromMonth: fromMonth, ToMonth: toMonth,
 		Category: filter.Category,
-		Feed: filter.FeedID, From: filter.From, To: filter.To, HasPrev: filter.Page > 1,
+		Feed:     filter.FeedID, From: filter.From, To: filter.To, HasPrev: filter.Page > 1,
 		HasNext: filter.Page*filter.PageSize < total,
 		PrevURL: pageURL(filter, fromMonth, toMonth, filter.Page-1), NextURL: pageURL(filter, fromMonth, toMonth, filter.Page+1),
+		MirrorMiss: strings.TrimSpace(r.URL.Query().Get("mirror_miss")),
 	}
 	data.FromYears, data.FromMonths, data.ToYears, data.ToMonths = s.monthOptions(fromMonth, toMonth)
 	if disk := s.diskUsage(); disk.OK {
@@ -386,6 +390,31 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if err := indexTemplate.Execute(w, data); err != nil {
 		return
 	}
+}
+
+// handleMirrorJump redirects a pasted source-site link to its archived mirror
+// page. Links with no archived copy bounce back to the index with a notice.
+func (s *Server) handleMirrorJump(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("url"))
+	if raw == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id, err := s.store.FindArticleIDByURL(raw)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Redirect(w, r, "/?mirror_miss="+url.QueryEscape(raw), http.StatusSeeOther)
+			return
+		}
+		log.Printf("mirror jump lookup failed: %v", err)
+		http.Error(w, "archive query failed", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/article/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
 func (s *Server) handleMCPGuide(w http.ResponseWriter, r *http.Request) {
@@ -402,6 +431,21 @@ func (s *Server) handleMCPGuide(w http.ResponseWriter, r *http.Request) {
 	}{Endpoint: requestBase(r) + "/mcp"}
 	w.Header().Set("Cache-Control", "no-cache")
 	if err := mcpGuideTemplate.Execute(w, data); err != nil {
+		return
+	}
+}
+
+func (s *Server) handleOpenData(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/open-data" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	if err := openDataTemplate.Execute(w, nil); err != nil {
 		return
 	}
 }
@@ -444,6 +488,7 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 	data.RenderedAt = time.Now().Format("2006-01-02 15:04:05")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Add("Vary", "Accept")
+	w.Header().Set("Cache-Tag", "article,article-"+strconv.FormatInt(id, 10))
 	if prefersMarkdown(r) {
 		writeMarkdown(w, s.articleMarkdown(item, requestBase(r)))
 		return
@@ -929,8 +974,8 @@ func contentDisposition(filename string) string {
 }
 
 const (
-	indexCacheControl     = "public, max-age=86400, s-maxage=31536000"
-	indexCDNCacheControl  = "public, max-age=31536000"
+	indexCacheControl     = "public, max-age=0, s-maxage=3600"
+	indexCDNCacheControl  = "public, max-age=3600"
 	staticCacheControl    = "public, max-age=86400, s-maxage=31536000"
 	staticCDNCacheControl = "public, max-age=31536000"
 	apiCacheControl       = "public, max-age=0, s-maxage=120"
@@ -989,13 +1034,18 @@ func responseCachePolicy(r *http.Request, status int) (string, string) {
 	if status >= http.StatusBadRequest {
 		return errorCacheControl, errorCDNCacheControl
 	}
-	// HTML pages and successfully archived assets are treated as stable public
-	// content: browsers keep them for one day while the edge may keep them for
-	// one year. API responses are handled by the branch below with a short TTL.
+	// Article pages and successfully archived assets are treated as stable
+	// public content: browsers keep them for one day while the edge may keep
+	// them for one year. The article list changes with every sync run, so its
+	// edge TTL is one hour and browsers always revalidate. Cache-Tag headers
+	// let the edge purge list pages ("index") separately from article pages
+	// ("article", "article-<id>"). API responses are handled by the branch
+	// below with a short TTL.
 	if r.URL.Path == "/" {
 		return indexCacheControl, indexCDNCacheControl
 	}
 	if r.URL.Path == "/help/mcp" ||
+		r.URL.Path == "/open-data" ||
 		strings.HasPrefix(r.URL.Path, "/article/") ||
 		strings.HasPrefix(r.URL.Path, "/assets/") ||
 		strings.HasPrefix(r.URL.Path, "/api/v1/resources/") {
@@ -1052,6 +1102,7 @@ a:hover{text-decoration:underline}
 .topbar .sub{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nav-toggle{display:none}
 .top-help{margin-left:auto;display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid #c9d9ef;border-radius:7px;background:#f5f9ff;font-size:12.5px;font-weight:600;white-space:nowrap}
+.top-help-secondary{margin-left:0}
 .top-help:hover{border-color:var(--primary);text-decoration:none}
 .nav-toggle-btn{display:none;padding:6px 14px;border:1px solid var(--line);border-radius:7px;background:var(--card);font-size:13px;cursor:pointer;user-select:none}
 .layout{max-width:1500px;margin:0 auto;padding:20px;display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;align-items:start}
@@ -1068,10 +1119,14 @@ a:hover{text-decoration:underline}
 .month-form{display:flex;flex-direction:column;gap:8px}
 .month-form select{padding:7px 6px;border:1px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
 .month-form select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px #1a5fb41a}
-.month-range{display:flex;gap:8px}
-.month-range label{flex:1;display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.month-range{display:flex;flex-direction:column;gap:8px}
+.month-range label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .month-selects{display:flex;gap:6px}
 .month-selects select{flex:1;min-width:0}
+.mirror-form{display:flex;flex-direction:column;gap:8px}
+.mirror-form input{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
+.mirror-form input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px #1a5fb41a}
+.notice{background:#fff8e6;border:1px solid #f0d78c;color:#7a5b00;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;word-break:break-all}
 .site-search{width:100%;padding:7px 10px;margin-bottom:8px;border:1px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
 .site-search:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px #1a5fb41a}
 .btn{padding:8px 14px;border:0;border-radius:7px;background:var(--primary);color:#fff;font-size:13.5px;font-weight:600;cursor:pointer}
@@ -1120,7 +1175,7 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 }
 @media(max-width:560px){.topbar-inner{padding:0 12px;gap:8px}.top-help{padding:6px 8px}.top-help .help-label{display:none}.pager{gap:5px}.pager .page-step{padding:0 10px}.jump-form{width:100%;justify-content:center;margin:6px 0 0}}
 </style></head><body>
-<header class="topbar"><div class="topbar-inner"><div class="logo">交</div><h1>SWJTU 新闻归档</h1><span class="sub">西南交通大学校园新闻离线存档与检索</span><a class="top-help" href="/help/mcp" aria-label="MCP 配置指南" title="MCP 配置指南"><span aria-hidden="true">⌘</span><span class="help-label">MCP 配置指南</span></a><label class="nav-toggle-btn" for="nav-toggle">筛选 ☰</label></div></header>
+<header class="topbar"><div class="topbar-inner"><div class="logo">交</div><h1>SWJTU 新闻归档</h1><span class="sub">西南交通大学校园新闻离线存档与检索</span><a class="top-help" href="/open-data" aria-label="数据公开" title="数据公开"><span aria-hidden="true">⬇</span><span class="help-label">数据公开</span></a><a class="top-help top-help-secondary" href="/help/mcp" aria-label="MCP 配置指南" title="MCP 配置指南"><span aria-hidden="true">⌘</span><span class="help-label">MCP 配置指南</span></a><label class="nav-toggle-btn" for="nav-toggle">筛选 ☰</label></div></header>
 <input type="checkbox" id="nav-toggle" class="nav-toggle">
 <div class="layout">
 <aside class="sidebar">
@@ -1139,6 +1194,11 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 </div>
 <button class="btn" type="submit">按时间查看</button>
 </form>{{if or .Site .FromMonth .ToMonth .Query}}<a class="clear-link" href="/">✕ 清除全部筛选</a>{{end}}</div>
+<div class="side-section"><div class="side-title">镜像跳转</div>
+<form class="mirror-form" method="get" action="/go">
+<input type="url" name="url" required placeholder="粘贴源站文章链接…" aria-label="源站文章链接">
+<button class="btn" type="submit">打开归档镜像</button>
+</form></div>
 </aside>
 <main>
 <form class="search" method="get">
@@ -1146,6 +1206,7 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 <input name="q" value="{{.Query}}" placeholder="搜索标题、正文、作者，或粘贴原文链接…">
 <button class="btn" type="submit">搜索</button>
 </form>
+{{if .MirrorMiss}}<div class="notice">未找到该源站链接对应的归档镜像：{{.MirrorMiss}}</div>{{end}}
 <div class="result-meta">共 <b>{{.Total}}</b> 篇文章
 {{if .Site}}{{range .Sites}}{{if .Active}}<span class="filter-chip">{{.SiteName}}<a href="?{{if $.Query}}q={{$.Query}}&{{end}}{{if $.FromMonth}}from_month={{$.FromMonth}}&{{end}}{{if $.ToMonth}}to_month={{$.ToMonth}}{{end}}" title="移除来源筛选">✕</a></span>{{end}}{{end}}{{end}}
 {{if or .FromMonth .ToMonth}}<span class="filter-chip">{{if eq .FromMonth .ToMonth}}{{.FromMonth}}{{else}}{{if .FromMonth}}{{.FromMonth}}{{else}}最早{{end}} ~ {{if .ToMonth}}{{.ToMonth}}{{else}}至今{{end}}{{end}}<a href="?{{if .Site}}site={{.Site}}&{{end}}{{if .Query}}q={{.Query}}{{end}}" title="移除时间筛选">✕</a></span>{{end}}
@@ -1210,6 +1271,36 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 }</code></pre><p class="note">不同客户端的字段名可能略有不同；如果客户端提供图形配置界面，直接填写名称、传输方式和 URL 即可。</p></section>
 <section class="section"><h2>可用工具</h2><ul class="tools"><li><code>list_feeds</code><span>查看新闻来源和筛选 ID</span></li><li><code>query_articles</code><span>按来源、类别和日期浏览文章</span></li><li><code>search_articles</code><span>全文搜索标题、正文和来源</span></li><li><code>get_article</code><span>读取正文、元数据和资源列表</span></li><li><code>download_resource</code><span>获取图片或附件下载地址</span></li></ul></section>
 <section class="section"><h2>使用建议</h2><p>可以先让客户端调用 <code>search_articles</code> 搜索关键词，再用 <code>get_article</code> 打开结果。需要保存附件时，调用 <code>download_resource</code> 获取归档下载地址。</p><p class="note">若连接失败，请确认 URL 以 <code>/mcp</code> 结尾，并检查客户端是否支持 Streamable HTTP。直接在浏览器中打开 MCP 地址会返回方法不允许，这是正常现象。</p></section>
+</main></body></html>`))
+
+var openDataTemplate = template.Must(template.New("open-data").Parse(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>数据公开 - SWJTU 新闻归档</title><style>
+:root{--primary:#1a5fb4;--primary-dark:#1c4a8c;--text:#1f2329;--muted:#6b7280;--line:#e5e7eb;--bg:#f4f5f7;--card:#fff;--code:#111827}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;font-size:15px;line-height:1.75}
+a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
+.topbar{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+.topbar-inner{max-width:920px;height:56px;margin:0 auto;padding:0 20px;display:flex;align-items:center;gap:14px}
+.back{padding:6px 12px;border:1px solid var(--line);border-radius:7px;color:var(--text);font-size:13px}.back:hover{border-color:var(--primary);color:var(--primary);text-decoration:none}
+.topbar-title{font-size:15px;font-weight:600}
+main{max-width:920px;margin:0 auto;padding:24px 20px 64px}
+.hero,.section{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:28px 32px;margin-bottom:18px}
+.hero h1{font-size:26px;line-height:1.35;margin:0 0 8px}.hero p{margin:0;color:var(--muted)}
+h2{font-size:18px;margin:0 0 14px}
+.endpoint{display:flex;align-items:center;gap:12px;margin-top:20px;padding:14px 16px;border:1px solid #bdd2ed;border-radius:9px;background:#f3f8ff}
+.endpoint strong{font-size:12px;color:var(--primary);text-transform:uppercase;letter-spacing:.7px;flex-shrink:0}.endpoint a{overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13.5px}
+.note{margin:14px 0 0;padding:11px 14px;border-left:3px solid var(--primary);background:#f8fafc;color:var(--muted);font-size:13px}
+.status{display:inline-flex;align-items:center;gap:7px;padding:4px 9px;border-radius:99px;background:#ecfdf3;color:#18794e;font-size:12px;font-weight:600}.status::before{content:"";width:7px;height:7px;border-radius:50%;background:#22a06b}
+.section p{margin:0 0 10px}.section p:last-child{margin-bottom:0}
+@media(max-width:640px){main{padding:14px 12px 42px}.topbar-inner{padding:0 12px}.hero,.section{padding:22px 18px}.hero h1{font-size:22px}.endpoint{align-items:flex-start;flex-direction:column;gap:4px}}
+</style></head><body>
+<header class="topbar"><div class="topbar-inner"><a class="back" href="/">← 返回列表</a><span class="topbar-title">数据公开</span></div></header>
+<main>
+<section class="hero"><span class="status">每日自动快照</span><h1>归档数据库公开下载</h1><p>本站的全部归档数据打包为 SQLite 数据库，每天凌晨自动快照并覆盖更新，任何人都可以自由下载使用。</p><div class="endpoint"><strong>下载地址</strong><a href="https://oss.swjtu.zip/database/news/latest.db">https://oss.swjtu.zip/database/news/latest.db</a></div></section>
+<section class="section"><h2>数据说明</h2><p>数据库文件约 1 GB，包含全部归档文章的标题、正文、来源、时间与资源元数据。图片和附件等大文件不放在库内，仍存放在对象存储的 <code>news-assets</code> 前缀下，库中记录对应的访问地址。</p><p>文件名固定为 <code>latest.db</code>，每次快照覆盖旧文件，只保留最新一份。教师与课程数据（扬华师课）的数据库在 <a href="https://oss.swjtu.zip/database/teach/latest.db">database/teach/latest.db</a>。</p></section>
+<section class="section"><h2>免责声明</h2><p>归档内容抓取自各单位网站的公开页面，版权归原作者与原站点所有，本站仅作离线存档与检索，供学习研究使用。</p><p><strong>我们不对数据的正确性、完整性和时效性作任何承诺</strong>，抓取与解析过程可能产生遗漏或错误，一切信息以原站点发布为准。</p></section>
+<section class="section"><h2>错误反馈</h2><p>如果发现归档内容有错误或遗漏，欢迎来信指正：<a href="mailto:news-feedback@swjtu.zip">news-feedback@swjtu.zip</a></p></section>
 </main></body></html>`))
 
 var articleTemplate = template.Must(template.New("article").Parse(`<!doctype html>
