@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -286,6 +288,26 @@ func TestMCPGuideUsesRequestEndpoint(t *testing.T) {
 	}
 }
 
+func TestOpenDataPage(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "https://archive.example/open-data", nil)
+	NewServer(store).Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, fragment := range []string{`数据公开`, `https://oss.swjtu.zip/database/news/latest.db`, `news-feedback@swjtu.zip`} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("open data page did not contain %q", fragment)
+		}
+	}
+}
+
 func TestCacheHeaders(t *testing.T) {
 	store, err := archive.Open(t.TempDir() + "/archive.db")
 	if err != nil {
@@ -300,6 +322,7 @@ func TestCacheHeaders(t *testing.T) {
 	}{
 		{name: "html", method: http.MethodGet, path: "/", wantStatus: http.StatusOK, wantCache: indexCacheControl, wantCDN: indexCDNCacheControl},
 		{name: "guide", method: http.MethodGet, path: "/help/mcp", wantStatus: http.StatusOK, wantCache: staticCacheControl, wantCDN: staticCDNCacheControl},
+		{name: "open data", method: http.MethodGet, path: "/open-data", wantStatus: http.StatusOK, wantCache: staticCacheControl, wantCDN: staticCDNCacheControl},
 		{name: "resource api path", method: http.MethodGet, path: "/api/v1/resources/1", wantStatus: http.StatusNotFound, wantCache: errorCacheControl, wantCDN: errorCDNCacheControl},
 		{name: "api", method: http.MethodGet, path: "/api/v1/articles?page=1", wantStatus: http.StatusOK, wantCache: apiCacheControl, wantCDN: apiCDNCacheControl},
 		{name: "api error", method: http.MethodGet, path: "/api/v1/articles/1", wantStatus: http.StatusNotFound, wantCache: errorCacheControl, wantCDN: errorCDNCacheControl},
@@ -413,5 +436,86 @@ func TestSyncTriggerEndpoint(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET trigger: got %d, want 405", rec.Code)
+	}
+}
+
+func TestMirrorJump(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	rawPath, rawHash, err := store.SaveRaw([]byte("raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.UpsertArticle(archive.ArticleInput{Feed: feed, Item: sdk.NewsItem{Title: "测试文章", URL: "https://news.swjtu.edu.cn/a.htm"}, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now(), Article: &sdk.Article{Title: "测试文章", Content: "正文", ContentHTML: "<p>正文</p>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(store).Handler()
+
+	for _, pasted := range []string{
+		"https://news.swjtu.edu.cn/a.htm",
+		"http://news.swjtu.edu.cn/a.htm",
+		"https://news.swjtu.edu.cn/a.htm?from=timeline#toc",
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/go?url="+url.QueryEscape(pasted), nil))
+		want := "/article/" + strconv.FormatInt(id, 10)
+		if recorder.Code != http.StatusSeeOther || recorder.Header().Get("Location") != want {
+			t.Fatalf("jump for %q: got %d %q, want 303 %q", pasted, recorder.Code, recorder.Header().Get("Location"), want)
+		}
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/go?url="+url.QueryEscape("https://news.swjtu.edu.cn/missing.htm"), nil))
+	location := recorder.Header().Get("Location")
+	if recorder.Code != http.StatusSeeOther || !strings.HasPrefix(location, "/?mirror_miss=") {
+		t.Fatalf("miss: got %d %q", recorder.Code, location)
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, location, nil))
+	if body := recorder.Body.String(); !strings.Contains(body, "未找到该源站链接对应的归档镜像") {
+		t.Fatalf("index after miss lacks notice: %q", body)
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/go", nil))
+	if recorder.Code != http.StatusSeeOther || recorder.Header().Get("Location") != "/" {
+		t.Fatalf("empty url: got %d %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+}
+
+func TestCacheTags(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	rawPath, rawHash, err := store.SaveRaw([]byte("raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.UpsertArticle(archive.ArticleInput{Feed: feed, Item: sdk.NewsItem{Title: "测试文章", URL: "https://news.swjtu.edu.cn/a.htm"}, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now(), Article: &sdk.Article{Title: "测试文章", Content: "正文", ContentHTML: "<p>正文</p>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(store).Handler()
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := recorder.Header().Get("Cache-Tag"); got != "index" {
+		t.Errorf("index Cache-Tag = %q, want %q", got, "index")
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/article/"+strconv.FormatInt(id, 10), nil))
+	want := "article,article-" + strconv.FormatInt(id, 10)
+	if got := recorder.Header().Get("Cache-Tag"); got != want {
+		t.Errorf("article Cache-Tag = %q, want %q", got, want)
 	}
 }
