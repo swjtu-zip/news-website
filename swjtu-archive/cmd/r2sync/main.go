@@ -57,6 +57,8 @@ func main() {
 	deletePrefix := flag.String("delete-prefix", "", "delete every object below this exact prefix instead of syncing")
 	changeStorageClass := flag.String("change-storage-class", "", "change existing objects below --change-prefix to STANDARD or STANDARD_IA")
 	changePrefix := flag.String("change-prefix", "", "R2 object prefix for --change-storage-class (defaults to the configured prefix)")
+	fixDisposition := flag.Bool("fix-content-disposition", false, "rewrite Content-Disposition metadata for attachments whose stored filename lacks an extension")
+	fixNames := flag.Bool("fix-resource-names", false, "sniff .bin objects to real extensions and complete extensionless attachment filenames")
 	flag.Parse()
 
 	if *workers < 1 || *maxFiles < 0 {
@@ -106,6 +108,18 @@ func main() {
 		}
 		targetPrefix += "/"
 		if err := changeExistingStorageClasses(ctx, client, targetPrefix, targetClass, *workers); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *fixDisposition {
+		if err := fixContentDispositions(ctx, client, filepath.Join(*dataDir, "archive.db"), *prefix, *workers); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *fixNames {
+		if err := fixResourceNames(ctx, client, *dataDir, *prefix, *workers); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -388,6 +402,159 @@ func changeExistingStorageClasses(ctx context.Context, client *r2.Client, prefix
 		return err
 	}
 	return nil
+}
+
+type dispositionFix struct {
+	key          string
+	contentType  string
+	filename     string
+	storageClass string
+}
+
+// fixContentDispositions rewrites the Content-Disposition metadata of
+// attachment objects whose stored filename lacks an extension (source pages
+// often label attachments with bare link text such as "附件1"). It uses
+// server-side metadata copies: object bytes never leave R2, and the current
+// storage class is passed back explicitly because REPLACE resets it.
+func fixContentDispositions(ctx context.Context, client *r2.Client, dbPath, prefix string, workers int) error {
+	fixes, err := loadDispositionFixes(dbPath, prefix)
+	if err != nil {
+		return err
+	}
+	if len(fixes) == 0 {
+		log.Printf("no attachment objects need a Content-Disposition fix")
+		return nil
+	}
+	objects, err := retryObjects(ctx, func() ([]r2.ObjectInfo, error) {
+		return client.ListObjects(ctx, strings.Trim(prefix, "/")+"/")
+	})
+	if err != nil {
+		return fmt.Errorf("list objects below %s: %w", prefix, err)
+	}
+	classes := make(map[string]string, len(objects))
+	for _, object := range objects {
+		classes[object.Key] = object.StorageClass
+	}
+	var missing int
+	candidates := fixes[:0]
+	for i := range fixes {
+		class, ok := classes[fixes[i].key]
+		if !ok {
+			missing++
+			continue
+		}
+		fixes[i].storageClass = class
+		candidates = append(candidates, fixes[i])
+	}
+	log.Printf("content-disposition fixes: %d candidates, %d skipped (object missing)", len(candidates), missing)
+	jobs := make(chan dispositionFix, workers*2)
+	var wg sync.WaitGroup
+	var scanned int64
+	var fixed int64
+	var failed int64
+	var firstErr error
+	var errMu sync.Mutex
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for fix := range jobs {
+				err := retryErr(ctx, func() error {
+					return client.UpdateObjectMetadata(ctx, fix.key, fix.contentType, fix.filename, fix.storageClass)
+				})
+				if err != nil {
+					atomic.AddInt64(&failed, 1)
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("%s: %w", fix.key, err)
+					}
+					errMu.Unlock()
+					log.Printf("content-disposition %s: %v", fix.key, err)
+				} else {
+					atomic.AddInt64(&fixed, 1)
+				}
+				n := atomic.AddInt64(&scanned, 1)
+				if n%100 == 0 || n == int64(len(candidates)) {
+					log.Printf("progress scanned=%d fixed=%d failed=%d", n, atomic.LoadInt64(&fixed), atomic.LoadInt64(&failed))
+				}
+			}
+		}()
+	}
+	for _, fix := range candidates {
+		select {
+		case jobs <- fix:
+		case <-ctx.Done():
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	log.Printf("complete scanned=%d fixed=%d failed=%d", atomic.LoadInt64(&scanned), atomic.LoadInt64(&fixed), atomic.LoadInt64(&failed))
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+func loadDispositionFixes(dbPath, prefix string) ([]dispositionFix, error) {
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro&_pragma=busy_timeout(30000)")
+	if err != nil {
+		return nil, fmt.Errorf("open archive metadata: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	rows, err := db.Query(`SELECT local_path, filename, content_type FROM resources
+WHERE kind='attachment' AND status='success' AND local_path LIKE 'assets/%'`)
+	if err != nil {
+		return nil, fmt.Errorf("read archive metadata: %w", err)
+	}
+	defer rows.Close()
+	byPath := make(map[string]dispositionFix)
+	for rows.Next() {
+		var localPath, filename, contentType string
+		if err := rows.Scan(&localPath, &filename, &contentType); err != nil {
+			log.Printf("scan archive metadata: %v", err)
+			continue
+		}
+		localPath = filepath.ToSlash(path.Clean(localPath))
+		desired := r2.DownloadFilename(filename, localPath)
+		if desired == "" || desired == filename {
+			continue
+		}
+		if _, exists := byPath[localPath]; exists {
+			continue
+		}
+		key, ok := r2.ObjectKey(prefix, localPath)
+		if !ok {
+			continue
+		}
+		byPath[localPath] = dispositionFix{key: key, contentType: fixContentType(contentType, localPath), filename: desired}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read archive metadata rows: %w", err)
+	}
+	fixes := make([]dispositionFix, 0, len(byPath))
+	for _, fix := range byPath {
+		fixes = append(fixes, fix)
+	}
+	return fixes, nil
+}
+
+// fixContentType mirrors the upload path: trust the recorded type unless it is
+// a generic binary type and the content-addressed path extension knows better.
+func fixContentType(contentType, localPath string) string {
+	trimmed := strings.TrimSpace(contentType)
+	guessed := mime.TypeByExtension(strings.ToLower(path.Ext(localPath)))
+	if (trimmed == "" || trimmed == "application/octet-stream" || trimmed == "binary/octet-stream") && guessed != "" {
+		return guessed
+	}
+	if trimmed != "" {
+		return trimmed
+	}
+	return "application/octet-stream"
 }
 
 func normalizeTargetStorageClass(value string) string {

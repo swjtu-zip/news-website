@@ -42,6 +42,7 @@ func main() {
 		Transport: resourceTransport,
 	}})
 	var resourceUploader archive.ResourceUploader
+	var rawUploader archive.RawPageUploader
 	if cfg.R2Enabled() {
 		uploader, err := r2.New(r2.Config{
 			Endpoint: cfg.R2Endpoint, Bucket: cfg.R2Bucket, Prefix: cfg.R2Prefix,
@@ -51,12 +52,21 @@ func main() {
 			logger.Fatal(err)
 		}
 		resourceUploader = uploader
+		raw, err := r2.New(r2.Config{
+			Endpoint: cfg.R2Endpoint, Bucket: cfg.R2Bucket, Prefix: cfg.R2RawPrefix,
+			AccessKeyID: cfg.R2AccessKeyID, SecretAccessKey: cfg.R2SecretAccessKey,
+		})
+		if err != nil {
+			logger.Fatal(err)
+		}
+		rawUploader = raw
 		logger.Printf("R2 resource uploads enabled: bucket=%s prefix=%s", cfg.R2Bucket, cfg.R2Prefix)
+		logger.Printf("R2 raw-page uploads enabled: bucket=%s prefix=%s", cfg.R2Bucket, cfg.R2RawPrefix)
 	}
 	syncer := archive.NewSyncer(store, client, archive.SyncOptions{
 		Backfill: cfg.Backfill, MaxPages: cfg.MaxPages, MaxConcurrent: cfg.MaxConcurrent,
 		RequestGap: cfg.RequestGap, RefreshAfter: cfg.RefreshAfter,
-		MaxResourceBytes: cfg.MaxResourceBytes, ResourceUploader: resourceUploader, Logger: logger,
+		MaxResourceBytes: cfg.MaxResourceBytes, ResourceUploader: resourceUploader, RawUploader: rawUploader, Logger: logger,
 	})
 
 	command := "serve"

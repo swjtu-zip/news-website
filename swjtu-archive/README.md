@@ -27,10 +27,11 @@ go run ./cmd/swjtu-archive
 | `SWJTU_ARCHIVE_R2_ENDPOINT` | 空 | R2 S3 账号端点（不含 bucket 路径） |
 | `SWJTU_ARCHIVE_R2_BUCKET` | 空 | R2 bucket 名称 |
 | `SWJTU_ARCHIVE_R2_PREFIX` | `news-assets` | R2 对象前缀 |
+| `SWJTU_ARCHIVE_R2_RAW_PREFIX` | `news-raw` | R2 prefix for source HTML pages |
 | `SWJTU_ARCHIVE_R2_ACCESS_KEY_ID` | 空 | R2 S3 访问密钥 ID；与 secret 一起设置才启用上传 |
 | `SWJTU_ARCHIVE_R2_SECRET_ACCESS_KEY` | 空 | R2 S3 机密访问密钥 |
 
-启用 R2 后，新下载的资源直接在内存中计算内容寻址键并上传到对象存储，不再写入本地 `assets` 目录，上传成功才记为成功资源；新上传资源统一使用 `STANDARD`。历史资源可用 `go run ./cmd/r2sync` 进行可恢复迁移，已存在对象会被跳过。若需要将指定前缀下的历史对象统一改为标准存储，可运行 `go run ./cmd/r2sync --change-storage-class STANDARD --change-prefix news-assets/`；工具会先检查对象类别，只对 `STANDARD_IA` 对象使用 R2 服务端 CopyObject 转换。确认迁移完成后可加 `--delete-local`，工具只会在 R2 对象已存在或本次上传成功后删除对应本地文件。
+启用 R2 后，新下载的资源和原始 HTML 页面都会直接从内存上传到对象存储，不再写入本地 `assets` 或 `raw` 目录；页面按内容寻址并默认存入 `news-raw/`。未启用 R2 时，原始页面仍保存在本地。新上传资源统一使用 `STANDARD`。历史资源可用 `go run ./cmd/r2sync` 进行可恢复迁移，已存在对象会被跳过。若需要将指定前缀下的历史对象统一改为标准存储，可运行 `go run ./cmd/r2sync --change-storage-class STANDARD --change-prefix news-assets/`；工具会先检查对象类别，只对 `STANDARD_IA` 对象使用 R2 服务端 CopyObject 转换。确认迁移完成后可加 `--delete-local`，工具只会在 R2 对象已存在或本次上传成功后删除对应本地文件。
 
 手动触发一次同步不再需要单独起容器，直接调用守护进程的接口即可：
 

@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -220,11 +221,16 @@ WHERE status='failed' AND (
 	return err
 }
 
-// SaveRaw stores a complete source page and returns its relative path and hash.
-func (s *Store) SaveRaw(data []byte) (string, string, error) {
+// RawMetadata returns the stable relative key and content hash without writing the page to disk.
+func (s *Store) RawMetadata(data []byte) (string, string) {
 	hash := sha256.Sum256(data)
 	hexHash := hex.EncodeToString(hash[:])
-	relative := filepath.ToSlash(filepath.Join("raw", hexHash[:2], hexHash+".html"))
+	return filepath.ToSlash(filepath.Join("raw", hexHash[:2], hexHash+".html")), hexHash
+}
+
+// SaveRaw stores a complete source page and returns its relative path and hash.
+func (s *Store) SaveRaw(data []byte) (string, string, error) {
+	relative, hexHash := s.RawMetadata(data)
 	if err := s.writeBlob(relative, strings.NewReader(string(data)), int64(len(data)), "", "text/html"); err != nil {
 		return "", "", err
 	}
@@ -239,6 +245,7 @@ func (s *Store) SaveResourceBody(body io.Reader, maxBytes int64, filename, conte
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
+	sniff, body := sniffPrefix(body)
 	hasher := sha256.New()
 	limited := io.LimitReader(io.MultiReader(io.TeeReader(body, hasher)), maxBytes+1)
 	size, err = io.Copy(tmp, limited)
@@ -252,7 +259,7 @@ func (s *Store) SaveResourceBody(body io.Reader, maxBytes int64, filename, conte
 		return "", "", size, fmt.Errorf("resource exceeds %d bytes", maxBytes)
 	}
 	hash = hex.EncodeToString(hasher.Sum(nil))
-	relative = resourceRelativePath(hash, filename, contentType)
+	relative = resourceRelativePath(hash, filename, contentType, sniff)
 	if err := s.moveTemp(tmpName, relative); err != nil {
 		return "", "", size, err
 	}
@@ -275,12 +282,99 @@ func BufferResourceBody(body io.Reader, maxBytes int64, filename, contentType st
 	}
 	sum := sha256.Sum256(data)
 	hash = hex.EncodeToString(sum[:])
-	return data, resourceRelativePath(hash, filename, contentType), hash, size, nil
+	sniff := data
+	if len(sniff) > SniffSize {
+		sniff = sniff[:SniffSize]
+	}
+	return data, resourceRelativePath(hash, filename, contentType, sniff), hash, size, nil
 }
 
-func resourceRelativePath(hash, filename, contentType string) string {
-	ext := resourceExtension(filename, contentType)
+func resourceRelativePath(hash, filename, contentType string, sniff []byte) string {
+	ext := resourceExtension(filename, contentType, sniff)
 	return filepath.ToSlash(filepath.Join("assets", hash[:2], hash+ext))
+}
+
+// SniffSize is how many leading bytes of a resource body are inspected when
+// the filename and content type cannot identify a proper extension.
+const SniffSize = 64 * 1024
+
+// sniffPrefix reads the first SniffSize bytes of a stream for content
+// sniffing and returns them together with a reader that replays the stream
+// from the beginning.
+func sniffPrefix(body io.Reader) ([]byte, io.Reader) {
+	prefix := make([]byte, SniffSize)
+	n, _ := io.ReadFull(body, prefix)
+	prefix = prefix[:n]
+	return prefix, io.MultiReader(bytes.NewReader(prefix), body)
+}
+
+// SniffExtension inspects the leading bytes of a resource body and returns a
+// filename extension for common document and image formats. It returns an
+// empty string when the content is not recognized, letting the caller fall
+// back to a generic extension.
+func SniffExtension(data []byte) string {
+	switch {
+	case bytes.HasPrefix(data, []byte("%PDF-")):
+		return ".pdf"
+	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
+		return ".png"
+	case len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff:
+		return ".jpg"
+	case bytes.HasPrefix(data, []byte("GIF8")):
+		return ".gif"
+	case len(data) > 26 && data[0] == 'B' && data[1] == 'M' &&
+		data[6] == 0 && data[7] == 0 && data[8] == 0 && data[9] == 0:
+		return ".bmp"
+	case bytes.HasPrefix(data, []byte("Rar!\x1a\x07")):
+		return ".rar"
+	case bytes.HasPrefix(data, []byte("7z\xbc\xaf\x27\x1c")):
+		return ".7z"
+	case bytes.HasPrefix(data, []byte("PK\x03\x04")) || bytes.HasPrefix(data, []byte("PK\x05\x06")):
+		return sniffZipExtension(data)
+	case bytes.HasPrefix(data, []byte("\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")):
+		return sniffCompoundExtension(data)
+	case len(data) > 12 && string(data[4:8]) == "ftyp":
+		return ".mp4"
+	}
+	return ""
+}
+
+// sniffZipExtension distinguishes OOXML office documents from plain ZIP
+// archives by the entry names recorded in local file headers near the start
+// of the archive.
+func sniffZipExtension(data []byte) string {
+	switch {
+	case bytes.Contains(data, []byte("word/document.xml")):
+		return ".docx"
+	case bytes.Contains(data, []byte("xl/workbook.xml")):
+		return ".xlsx"
+	case bytes.Contains(data, []byte("ppt/presentation.xml")):
+		return ".pptx"
+	}
+	return ".zip"
+}
+
+// sniffCompoundExtension identifies legacy OLE2 office documents (.doc/.xls/
+// .ppt) by the stream names stored in the compound-file directory, which are
+// encoded as UTF-16LE.
+func sniffCompoundExtension(data []byte) string {
+	switch {
+	case containsUTF16(data, "WordDocument"):
+		return ".doc"
+	case containsUTF16(data, "PowerPoint Document"):
+		return ".ppt"
+	case containsUTF16(data, "Workbook"), containsUTF16(data, "Book"):
+		return ".xls"
+	}
+	return ""
+}
+
+func containsUTF16(data []byte, value string) bool {
+	pattern := make([]byte, 0, len(value)*2)
+	for i := 0; i < len(value); i++ {
+		pattern = append(pattern, value[i], 0)
+	}
+	return bytes.Contains(data, pattern)
 }
 
 func (s *Store) moveTemp(tmpName, relative string) error {
@@ -1258,20 +1352,27 @@ func normalizeDate(value string) string {
 
 var unsafeFilename = regexp.MustCompile(`[^\p{L}\p{N}._-]+`)
 
-func resourceExtension(filename, contentType string) string {
+func resourceExtension(filename, contentType string, sniff []byte) string {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext != "" && len(ext) <= 10 && !strings.ContainsAny(ext, `/\\`) {
 		return ext
 	}
 	mediaType, _, _ := mime.ParseMediaType(contentType)
-	if exts, _ := mime.ExtensionsByType(mediaType); len(exts) > 0 {
-		sort.Strings(exts)
-		return exts[0]
+	// Generic binary types carry no format information (and map to .bin in
+	// the mime table); let the content sniff below decide instead.
+	if mediaType != "" && mediaType != "application/octet-stream" && mediaType != "binary/octet-stream" {
+		if exts, _ := mime.ExtensionsByType(mediaType); len(exts) > 0 {
+			sort.Strings(exts)
+			return exts[0]
+		}
 	}
 	if parsed, err := url.Parse(filename); err == nil {
 		if ext := filepath.Ext(parsed.Path); ext != "" {
 			return strings.ToLower(ext)
 		}
+	}
+	if ext := SniffExtension(sniff); ext != "" {
+		return ext
 	}
 	return ".bin"
 }

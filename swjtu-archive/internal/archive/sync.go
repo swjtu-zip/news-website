@@ -25,6 +25,7 @@ type SyncOptions struct {
 	RefreshAfter     time.Duration
 	MaxResourceBytes int64
 	ResourceUploader ResourceUploader
+	RawUploader      RawPageUploader
 	Logger           *log.Logger
 }
 
@@ -39,6 +40,11 @@ type ResourceUploader interface {
 	// UploadBytes uploads an in-memory resource so freshly downloaded assets
 	// go straight to the object store without touching the host disk.
 	UploadBytes(ctx context.Context, data []byte, localPath, contentType, filename, kind, storageClass string) error
+}
+
+// RawPageUploader stores fetched source HTML outside the service host.
+type RawPageUploader interface {
+	UploadRaw(ctx context.Context, data []byte, localPath string) error
 }
 
 // SyncResult reports work performed by one synchronization pass.
@@ -258,7 +264,13 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 		if article.Date == "" {
 			article.Date = item.Date
 		}
-		rawPath, rawHash, err := s.store.SaveRaw(raw)
+		var rawPath, rawHash string
+		if s.opts.RawUploader != nil {
+			rawPath, rawHash = s.store.RawMetadata(raw)
+			err = s.opts.RawUploader.UploadRaw(ctx, raw, rawPath)
+		} else {
+			rawPath, rawHash, err = s.store.SaveRaw(raw)
+		}
 		if err != nil {
 			result.Failures++
 			result.Errors = append(result.Errors, fmt.Sprintf("保存原文 %s: %v", item.URL, err))
@@ -361,7 +373,7 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		}
 		filename := resource.Filename
 		if preferredName != "" {
-			filename = preferredName
+			filename = preferredNameWithExtension(preferredName, resource.Filename)
 		}
 		var localPath, hash string
 		var size int64
@@ -403,6 +415,30 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 		Filename: safeFilename(preferredName), Status: "failed", Error: lastErr.Error(), UpdatedAt: time.Now(),
 	})
 	return false, lastErr
+}
+
+// preferredNameWithExtension keeps the source page's attachment label as the
+// stored filename, but borrows the extension from the download response
+// (Content-Disposition header or URL) when the label itself has none. Source
+// pages frequently label attachments with bare text such as "附件1" while
+// the link target carries the real extension.
+func preferredNameWithExtension(name, responseFilename string) string {
+	if ext := filepath.Ext(name); ext != "" && len(ext) <= 10 {
+		return name
+	}
+	ext := strings.ToLower(filepath.Ext(responseFilename))
+	if len(ext) < 2 || len(ext) > 10 || dynamicPageExtensions[ext] {
+		return name
+	}
+	return name + ext
+}
+
+// dynamicPageExtensions are URL suffixes of CMS download endpoints rather
+// than of the files they serve; they must never be borrowed as a filename
+// extension.
+var dynamicPageExtensions = map[string]bool{
+	".jsp": true, ".jspx": true, ".php": true, ".asp": true, ".aspx": true,
+	".do": true, ".action": true, ".htm": true, ".html": true, ".shtml": true,
 }
 
 func articlePublishedAt(article *sdk.Article, item sdk.NewsItem) string {

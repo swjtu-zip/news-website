@@ -64,6 +64,25 @@ func TestIsDownloadableResourceURL(t *testing.T) {
 	}
 }
 
+func TestPreferredNameWithExtension(t *testing.T) {
+	cases := []struct {
+		name, responseFilename, want string
+	}{
+		{"附件1", "关于奖学金的通知.pdf", "附件1.pdf"},
+		{"附件1", "download.jsp", "附件1"},
+		{"附件1", "downfile.php", "附件1"},
+		{"通知.doc", "ignored.pdf", "通知.doc"},
+		{"附件1", "表格.XLSX", "附件1.xlsx"},
+		{"附件1", "", "附件1"},
+		{"附件1", "noext", "附件1"},
+	}
+	for _, tc := range cases {
+		if got := preferredNameWithExtension(tc.name, tc.responseFilename); got != tc.want {
+			t.Errorf("preferredNameWithExtension(%q, %q) = %q, want %q", tc.name, tc.responseFilename, got, tc.want)
+		}
+	}
+}
+
 func TestResourceStorageClass(t *testing.T) {
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	tests := []struct {
