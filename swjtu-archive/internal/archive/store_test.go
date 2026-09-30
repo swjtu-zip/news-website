@@ -430,6 +430,52 @@ func TestSaveResourceBodyRejectsOversize(t *testing.T) {
 	}
 }
 
+func TestSniffExtension(t *testing.T) {
+	docx := append([]byte("PK\x03\x04"), make([]byte, 64)...)
+	docx = append(docx, []byte("[Content_Types].xml")...)
+	docx = append(docx, []byte("word/document.xml")...)
+	cfbDoc := append([]byte("\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"), make([]byte, 512)...)
+	copy(cfbDoc[256:], []byte("W\x00o\x00r\x00d\x00D\x00o\x00c\x00u\x00m\x00e\x00n\x00t\x00"))
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"pdf", []byte("%PDF-1.7 rest"), ".pdf"},
+		{"png", []byte("\x89PNG\r\n\x1a\nrest"), ".png"},
+		{"jpeg", []byte("\xff\xd8\xff\xe0rest"), ".jpg"},
+		{"gif", []byte("GIF89a rest"), ".gif"},
+		{"rar", []byte("Rar!\x1a\x07\x00rest"), ".rar"},
+		{"7z", []byte("7z\xbc\xaf\x27\x1crest"), ".7z"},
+		{"docx", docx, ".docx"},
+		{"zip", []byte("PK\x03\x04plain-zip-entry"), ".zip"},
+		{"ole-doc", cfbDoc, ".doc"},
+		{"mp4", []byte("\x00\x00\x00\x18ftypmp42rest"), ".mp4"},
+		{"unknown", []byte("plain text body"), ""},
+		{"empty", nil, ""},
+	}
+	for _, tc := range cases {
+		if got := SniffExtension(tc.data); got != tc.want {
+			t.Errorf("%s: SniffExtension() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestSaveResourceBodySniffsExtensionlessContent(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	relative, _, _, err := store.SaveResourceBody(strings.NewReader("%PDF-1.4 fake"), 1024, "附件1", "application/octet-stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(relative, ".pdf") {
+		t.Fatalf("relative path %q does not carry the sniffed .pdf extension", relative)
+	}
+}
+
 func TestSiteFacetsAggregatesWithoutSQLiteTempSort(t *testing.T) {
 	store, err := Open(t.TempDir() + "/archive.db")
 	if err != nil {

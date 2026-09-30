@@ -17,6 +17,7 @@ type Config struct {
 	R2Endpoint        string
 	R2Bucket          string
 	R2Prefix          string
+	R2RawPrefix       string
 	R2AccessKeyID     string
 	R2SecretAccessKey string
 	Interval          time.Duration
@@ -76,6 +77,7 @@ func Load() (Config, error) {
 	r2Endpoint := env("SWJTU_ARCHIVE_R2_ENDPOINT", "")
 	r2Bucket := env("SWJTU_ARCHIVE_R2_BUCKET", "")
 	r2Prefix := env("SWJTU_ARCHIVE_R2_PREFIX", "news-assets")
+	r2RawPrefix := env("SWJTU_ARCHIVE_R2_RAW_PREFIX", "news-raw")
 	r2AccessKeyID := env("SWJTU_ARCHIVE_R2_ACCESS_KEY_ID", "")
 	r2SecretAccessKey := env("SWJTU_ARCHIVE_R2_SECRET_ACCESS_KEY", "")
 	r2Configured := r2Endpoint != "" || r2Bucket != "" || r2AccessKeyID != "" || r2SecretAccessKey != ""
@@ -90,6 +92,7 @@ func Load() (Config, error) {
 		R2Endpoint:        r2Endpoint,
 		R2Bucket:          r2Bucket,
 		R2Prefix:          r2Prefix,
+		R2RawPrefix:       r2RawPrefix,
 		R2AccessKeyID:     r2AccessKeyID,
 		R2SecretAccessKey: r2SecretAccessKey,
 		Interval:          interval,

@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -83,13 +84,18 @@ func New(cfg Config) (*Client, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("R2 object prefix is required")
 	}
+	// The default TLS handshake timeout (10s) is too tight for the flaky
+	// uplink this client often runs behind; handshakes there can take tens
+	// of seconds without the connection being dead.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSHandshakeTimeout = 60 * time.Second
 	return &Client{
 		endpoint:        parsed,
 		bucket:          bucket,
 		prefix:          prefix,
 		accessKeyID:     strings.TrimSpace(cfg.AccessKeyID),
 		secretAccessKey: strings.TrimSpace(cfg.SecretAccessKey),
-		httpClient:      &http.Client{Timeout: 10 * time.Minute},
+		httpClient:      &http.Client{Timeout: 10 * time.Minute, Transport: transport},
 	}, nil
 }
 
@@ -102,6 +108,23 @@ func ObjectKey(prefix, localPath string) (string, bool) {
 	}
 	relative := strings.TrimPrefix(localPath, "assets/")
 	if relative == "" || relative == "." || strings.HasPrefix(relative, "../") || relative == ".." {
+		return "", false
+	}
+	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+	if prefix == "" {
+		return "", false
+	}
+	return prefix + "/" + relative, true
+}
+
+// RawObjectKey maps raw/xx/hash.html to the matching key below the configured raw prefix.
+func RawObjectKey(prefix, localPath string) (string, bool) {
+	localPath = strings.TrimSpace(strings.ReplaceAll(localPath, "\\", "/"))
+	if !strings.HasPrefix(localPath, "raw/") {
+		return "", false
+	}
+	relative := path.Clean(strings.TrimPrefix(localPath, "raw/"))
+	if relative == "" || relative == "." || relative == ".." || strings.HasPrefix(relative, "../") || strings.HasPrefix(relative, "/") {
 		return "", false
 	}
 	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
@@ -153,6 +176,7 @@ func (c *Client) UploadBytes(ctx context.Context, data []byte, localPath, conten
 	}
 	hash := sha256.Sum256(data)
 	contentType = normalizeContentType(contentType, filename)
+	filename = DownloadFilename(filename, localPath)
 	resp, err := c.do(ctx, http.MethodPut, key, io.NopCloser(bytes.NewReader(data)), int64(len(data)), hex.EncodeToString(hash[:]), contentType, filename, kind, storageClass)
 	if err != nil {
 		return err
@@ -160,6 +184,24 @@ func (c *Client) UploadBytes(ctx context.Context, data []byte, localPath, conten
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return responseError(resp, "upload", key)
+	}
+	return nil
+}
+
+// UploadRaw uploads an in-memory source page below this client's raw prefix.
+func (c *Client) UploadRaw(ctx context.Context, data []byte, localPath string) error {
+	key, ok := RawObjectKey(c.prefix, localPath)
+	if !ok {
+		return fmt.Errorf("invalid raw page path %q", localPath)
+	}
+	hash := sha256.Sum256(data)
+	resp, err := c.do(ctx, http.MethodPut, key, io.NopCloser(bytes.NewReader(data)), int64(len(data)), hex.EncodeToString(hash[:]), "text/html", "", "", "")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return responseError(resp, "upload raw page", key)
 	}
 	return nil
 }
@@ -245,6 +287,131 @@ func (c *Client) ChangeObjectStorageClass(ctx context.Context, key, storageClass
 	return nil
 }
 
+// UpdateObjectMetadata rewrites an object's Content-Type and Content-Disposition
+// using a server-side CopyObject with the REPLACE directive. REPLACE resets any
+// header that is not sent explicitly, so the current storage class must be
+// passed back in to keep it.
+func (c *Client) UpdateObjectMetadata(ctx context.Context, key, contentType, filename, storageClass string) error {
+	key = strings.TrimSpace(strings.ReplaceAll(key, "\\", "/"))
+	if key == "" || path.Clean(key) != key || strings.HasPrefix(key, "../") || key == ".." {
+		return fmt.Errorf("invalid object key %q", key)
+	}
+	storageClass = normalizeStorageClass(storageClass)
+	if storageClass == "" {
+		return fmt.Errorf("invalid R2 storage class %q", storageClass)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.objectURL(key), nil)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	req.Header.Set("x-amz-content-sha256", emptySHA256)
+	req.Header.Set("x-amz-date", now.Format(amzTimeFormat))
+	req.Header.Set("x-amz-copy-source", "/"+c.bucket+"/"+key)
+	req.Header.Set("x-amz-metadata-directive", "REPLACE")
+	req.Header.Set("x-amz-storage-class", storageClass)
+	if contentType = strings.TrimSpace(contentType); contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if filename = strings.TrimSpace(filename); filename != "" {
+		req.Header.Set("Content-Disposition", contentDisposition(filename))
+	}
+	if err := c.sign(req, now, emptySHA256); err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("R2 update metadata %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return responseError(resp, "update metadata", key)
+	}
+	return nil
+}
+
+// GetObjectBytes downloads the first maxBytes of an exact object key. It is
+// used to content-sniff objects that have no local copy.
+func (c *Client) GetObjectBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
+	key = strings.TrimSpace(strings.ReplaceAll(key, "\\", "/"))
+	if key == "" || path.Clean(key) != key || strings.HasPrefix(key, "../") || key == ".." {
+		return nil, fmt.Errorf("invalid object key %q", key)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(key), nil)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	req.Header.Set("x-amz-content-sha256", emptySHA256)
+	req.Header.Set("x-amz-date", now.Format(amzTimeFormat))
+	if maxBytes > 0 {
+		req.Header.Set("Range", "bytes=0-"+strconv.FormatInt(maxBytes-1, 10))
+	}
+	if err := c.sign(req, now, emptySHA256); err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("R2 get %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		// A range starting at byte 0 is only unsatisfiable for empty objects.
+		resp.Body.Close()
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return nil, responseError(resp, "get", key)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read R2 object %s: %w", key, err)
+	}
+	return data, nil
+}
+
+// CopyObject duplicates an object under a new key with fresh metadata, using
+// R2's server-side copy. The content itself never leaves R2. An empty
+// storageClass keeps the default; pass the source class explicitly when it
+// must be preserved.
+func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey, contentType, filename, kind, storageClass string) error {
+	for _, key := range []string{srcKey, dstKey} {
+		if key == "" || path.Clean(key) != key || strings.HasPrefix(key, "../") || key == ".." {
+			return fmt.Errorf("invalid object key %q", key)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.objectURL(dstKey), nil)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	req.Header.Set("x-amz-content-sha256", emptySHA256)
+	req.Header.Set("x-amz-date", now.Format(amzTimeFormat))
+	req.Header.Set("x-amz-copy-source", "/"+c.bucket+"/"+srcKey)
+	req.Header.Set("x-amz-metadata-directive", "REPLACE")
+	if normalized := normalizeStorageClass(storageClass); normalized != "" {
+		req.Header.Set("x-amz-storage-class", normalized)
+	}
+	if contentType = strings.TrimSpace(contentType); contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if kind == "attachment" && strings.TrimSpace(filename) != "" {
+		req.Header.Set("Content-Disposition", contentDisposition(filename))
+	}
+	if err := c.sign(req, now, emptySHA256); err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("R2 copy %s -> %s: %w", srcKey, dstKey, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return responseError(resp, "copy", dstKey)
+	}
+	return nil
+}
+
 // ObjectInfo contains the key and storage class returned by R2's object list.
 type ObjectInfo struct {
 	Key          string
@@ -261,41 +428,9 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, 
 	var objects []ObjectInfo
 	var continuation string
 	for {
-		target := *c.endpoint
-		target.Path = strings.TrimRight(target.Path, "/") + "/" + c.bucket
-		query := url.Values{}
-		query.Set("list-type", "2")
-		query.Set("max-keys", "1000")
-		query.Set("prefix", prefix)
-		if continuation != "" {
-			query.Set("continuation-token", continuation)
-		}
-		target.RawQuery = query.Encode()
-		target.Fragment = ""
-		now := time.Now().UTC()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+		result, err := c.listObjectsPage(ctx, prefix, continuation)
 		if err != nil {
 			return nil, err
-		}
-		req.Header.Set("x-amz-content-sha256", emptySHA256)
-		req.Header.Set("x-amz-date", now.Format(amzTimeFormat))
-		if err := c.sign(req, now, emptySHA256); err != nil {
-			return nil, err
-		}
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("R2 list %s: %w", prefix, err)
-		}
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			err := responseError(resp, "list", prefix)
-			resp.Body.Close()
-			return nil, err
-		}
-		var result listObjectsV2Response
-		err = xml.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("decode R2 list %s: %w", prefix, err)
 		}
 		for _, object := range result.Contents {
 			if object.Key != "" {
@@ -311,6 +446,71 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, 
 		}
 		continuation = result.NextContinuationToken
 	}
+}
+
+// listObjectsPage fetches one page of an object listing. Pages are retried
+// individually so that a flaky link cannot force a long listing to restart
+// from the first page.
+func (c *Client) listObjectsPage(ctx context.Context, prefix, continuation string) (*listObjectsV2Response, error) {
+	var last error
+	for attempt := 0; attempt < 6; attempt++ {
+		result, err := c.listObjectsPageOnce(ctx, prefix, continuation)
+		if err == nil {
+			return result, nil
+		}
+		last = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Second)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		}
+	}
+	return nil, last
+}
+
+func (c *Client) listObjectsPageOnce(ctx context.Context, prefix, continuation string) (*listObjectsV2Response, error) {
+	target := *c.endpoint
+	target.Path = strings.TrimRight(target.Path, "/") + "/" + c.bucket
+	query := url.Values{}
+	query.Set("list-type", "2")
+	query.Set("max-keys", "1000")
+	query.Set("prefix", prefix)
+	if continuation != "" {
+		query.Set("continuation-token", continuation)
+	}
+	target.RawQuery = query.Encode()
+	target.Fragment = ""
+	now := time.Now().UTC()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-amz-content-sha256", emptySHA256)
+	req.Header.Set("x-amz-date", now.Format(amzTimeFormat))
+	if err := c.sign(req, now, emptySHA256); err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("R2 list %s: %w", prefix, err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		err := responseError(resp, "list", prefix)
+		resp.Body.Close()
+		return nil, err
+	}
+	var result listObjectsV2Response
+	err = xml.NewDecoder(resp.Body).Decode(&result)
+	resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("decode R2 list %s: %w", prefix, err)
+	}
+	return &result, nil
 }
 
 // ListPrefix returns all object keys below a prefix using S3's paginated
@@ -527,6 +727,22 @@ func normalizeStorageClass(value string) string {
 	default:
 		return ""
 	}
+}
+
+// DownloadFilename returns the filename to advertise in Content-Disposition.
+// Source pages often label attachments with link text that carries no
+// extension (for example "附件1"); the content-addressed local path always
+// has one, so borrow it to keep downloaded files directly openable.
+func DownloadFilename(filename, localPath string) string {
+	filename = strings.TrimSpace(filename)
+	if filename == "" || filepath.Ext(filename) != "" {
+		return filename
+	}
+	localPath = path.Clean(strings.ReplaceAll(strings.TrimSpace(localPath), "\\", "/"))
+	if ext := path.Ext(localPath); len(ext) > 1 && len(ext) <= 10 {
+		return filename + ext
+	}
+	return filename
 }
 
 func contentDisposition(filename string) string {
