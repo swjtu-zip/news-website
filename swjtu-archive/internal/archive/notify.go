@@ -161,9 +161,6 @@ func buildSyncSummaryMessage(result SyncResult, started, finished time.Time, ent
 			break
 		}
 		fmt.Fprintf(&b, "×%d %s\n", entry.count, entry.key)
-		for _, sample := range entry.samples {
-			fmt.Fprintf(&b, "  示例: %s\n", sample)
-		}
 	}
 	return truncateBytes(b.String(), summaryMaxBytes)
 }
