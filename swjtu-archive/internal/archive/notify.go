@@ -140,29 +140,120 @@ func severeSyncError(message string) bool {
 	return false
 }
 
-func buildSevereAlertMessage(runID int64, cause string, result SyncResult, started, now time.Time) string {
-	var b strings.Builder
-	b.WriteString("【严重】同步任务已中断\n")
-	fmt.Fprintf(&b, "run=%d\n", runID)
-	fmt.Fprintf(&b, "原因: %s\n", truncateBytes(cause, 500))
-	fmt.Fprintf(&b, "已处理 feeds=%d articles=%d resources=%d failures=%d 耗时=%s\n",
-		result.Feeds, result.Articles, result.Resources, result.Failures, now.Sub(started).Round(time.Second))
-	return truncateBytes(b.String(), summaryMaxBytes)
+// notifyCard delivers an interactive card to the Feishu webhook configured by
+// FEISHU_WEBHOOK_URL. Silent no-op when the variable is unset.
+func notifyCard(logger *log.Logger, card map[string]any) {
+	if err := notify.SendCard(card); err != nil && logger != nil {
+		logger.Printf("feishu card notify: %v", err)
+	}
 }
 
-func buildSyncSummaryMessage(result SyncResult, started, finished time.Time, entries []*errorEntry) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "【同步告警】run=%d 采集存在失败\n", result.RunID)
-	fmt.Fprintf(&b, "feeds=%d articles=%d resources=%d failures=%d 耗时=%s\n",
-		result.Feeds, result.Articles, result.Resources, result.Failures, finished.Sub(started).Round(time.Second))
+func mdText(content string) map[string]any {
+	return map[string]any{"tag": "lark_md", "content": content}
+}
+
+func plainText(content string) map[string]any {
+	return map[string]any{"tag": "plain_text", "content": content}
+}
+
+// buildSyncSummaryCard renders the end-of-run summary as a polished
+// interactive card: stats overview on top, top error kinds below, and the
+// full per-error samples inside a collapsed panel.
+func buildSyncSummaryCard(result SyncResult, started, finished time.Time, entries []*errorEntry) map[string]any {
+	duration := finished.Sub(started).Round(time.Second).String()
+
+	var topLines strings.Builder
 	for i, entry := range entries {
 		if i >= summaryTopErrors {
-			fmt.Fprintf(&b, "…另有 %d 类错误\n", len(entries)-i)
+			fmt.Fprintf(&topLines, "…另有 %d 类错误\n", len(entries)-i)
 			break
 		}
-		fmt.Fprintf(&b, "×%d %s\n", entry.count, entry.key)
+		fmt.Fprintf(&topLines, "• ×%d %s\n", entry.count, entry.key)
 	}
-	return truncateBytes(b.String(), summaryMaxBytes)
+	topText := strings.TrimSpace(topLines.String())
+	if topText == "" {
+		topText = "无"
+	}
+
+	var detailLines strings.Builder
+	for i, entry := range entries {
+		fmt.Fprintf(&detailLines, "**%d. ×%d %s**\n", i+1, entry.count, entry.key)
+		for _, sample := range entry.samples {
+			fmt.Fprintf(&detailLines, "› %s\n", sample)
+		}
+		detailLines.WriteString("\n")
+	}
+	detailText := strings.TrimSpace(detailLines.String())
+	if detailText == "" {
+		detailText = "无"
+	}
+
+	return map[string]any{
+		"header": map[string]any{
+			"title":    plainText("📰 新闻同步告警"),
+			"subtitle": plainText(fmt.Sprintf("run=%d · %s", result.RunID, formatBeijing(finished))),
+			"template": "red",
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "div",
+				"fields": []any{
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**Feeds**\n%d", result.Feeds))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**新增文章**\n%d", result.Articles))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**资源**\n%d", result.Resources))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**失败**\n%d", result.Failures))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**耗时**\n%s", duration))},
+				},
+			},
+			map[string]any{"tag": "hr"},
+			map[string]any{
+				"tag":  "div",
+				"text": mdText("**Top 错误类型**\n" + topText),
+			},
+			map[string]any{
+				"tag":      "collapsible_panel",
+				"expanded": false,
+				"header":   map[string]any{"title": plainText("📋 展开查看完整错误详情")},
+				"elements": []any{
+					map[string]any{
+						"tag":  "div",
+						"text": mdText(detailText),
+					},
+				},
+			},
+		},
+	}
+}
+
+// buildSevereAlertCard renders the run-aborting alert as an urgent card.
+func buildSevereAlertCard(runID int64, cause string, result SyncResult, started, now time.Time) map[string]any {
+	return map[string]any{
+		"header": map[string]any{
+			"title":    plainText("🚨 同步严重告警：任务已中断"),
+			"subtitle": plainText(fmt.Sprintf("run=%d · %s", runID, formatBeijing(now))),
+			"template": "red",
+		},
+		"elements": []any{
+			map[string]any{
+				"tag":  "div",
+				"text": mdText(fmt.Sprintf("**原因**\n%s", truncateBytes(cause, 500))),
+			},
+			map[string]any{"tag": "hr"},
+			map[string]any{
+				"tag": "div",
+				"fields": []any{
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**Feeds**\n%d", result.Feeds))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**文章**\n%d", result.Articles))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**失败**\n%d", result.Failures))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**已耗时**\n%s", now.Sub(started).Round(time.Second).String()))},
+				},
+			},
+		},
+	}
+}
+
+func formatBeijing(t time.Time) string {
+	return t.In(time.FixedZone("Asia/Shanghai", 8*60*60)).Format("2006-01-02 15:04:05")
 }
 
 func truncateRunes(s string, max int) string {
@@ -173,15 +264,9 @@ func truncateRunes(s string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-// truncateBytes cuts s to at most max bytes without splitting a multi-byte
-// rune.
 func truncateBytes(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	cut := s[:max]
-	for len(cut) > 0 && !utf8.ValidString(cut) {
-		cut = cut[:len(cut)-1]
-	}
-	return cut + "…"
+	return s[:max] + "…"
 }

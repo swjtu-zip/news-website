@@ -150,7 +150,7 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 			result.Failures++
 			result.Errors = append(result.Errors, fmt.Sprintf("保存 feed %s: %v", feed.ID, err))
 			if severeSyncError(err.Error()) && claimSevere(err) {
-				notifyFeishu(s.opts.Logger, buildSevereAlertMessage(runID, err.Error(), result, started, time.Now()))
+				notifyCard(s.opts.Logger, buildSevereAlertCard(runID, err.Error(), result, started, time.Now()))
 				cancelRun()
 				break
 			}
@@ -193,7 +193,7 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 					// the run and alert now instead of letting the whole
 					// pass limp to its end.
 					cancelRun()
-					notifyFeishu(s.opts.Logger, buildSevereAlertMessage(runID, severe, result, started, time.Now()))
+					notifyCard(s.opts.Logger, buildSevereAlertCard(runID, severe, result, started, time.Now()))
 				}
 			}
 		}()
@@ -248,7 +248,7 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 		for _, message := range result.Errors {
 			collector.add(message)
 		}
-		notifyFeishu(s.opts.Logger, buildSyncSummaryMessage(result, started, time.Now(), collector.snapshot()))
+		notifyCard(s.opts.Logger, buildSyncSummaryCard(result, started, time.Now(), collector.snapshot()))
 	}
 	severeMu.Lock()
 	severe := severeErr

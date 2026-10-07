@@ -64,3 +64,41 @@ func IsSevere(err error) bool {
 	}
 	return false
 }
+
+// SendCard posts a Feishu interactive card. card is the "card" object of the
+// interactive message payload. Like Send, it is a no-op when
+// FEISHU_WEBHOOK_URL is empty.
+func SendCard(card map[string]any) error {
+	webhook := strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_URL"))
+	if webhook == "" {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]any{
+		"msg_type": "interactive",
+		"card":     card,
+	})
+	if err != nil {
+		return err
+	}
+	// Feishu cards have a ~30KB hard limit; refuse to send an oversized one
+	// rather than silently failing server-side.
+	if len(payload) > 28*1024 {
+		return fmt.Errorf("feishu card too large: %d bytes", len(payload))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("feishu webhook: status %d", resp.StatusCode)
+	}
+	return nil
+}
