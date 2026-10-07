@@ -371,6 +371,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		MirrorMiss string
 		DiskOK     bool
 		DiskText   string
+		SyncText   string
 	}{
 		Items: items, Sites: sites, Pages: pageNumbers, Total: total, TotalPages: totalPages,
 		Page: filter.Page, PageSize: filter.PageSize,
@@ -387,9 +388,33 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		data.DiskText = fmt.Sprintf("归档占用 %s · 磁盘可用 %s / %s",
 			formatBytes(uint64(disk.ArchiveBytes)), formatBytes(disk.DiskFree), formatBytes(disk.DiskTotal))
 	}
+	data.SyncText = lastSyncText(s.store)
 	if err := indexTemplate.Execute(w, data); err != nil {
 		return
 	}
+}
+
+// lastSyncText renders the footer capsule's "上次收集" line from the most
+// recent finished sync run, in Asia/Shanghai time.
+func lastSyncText(store *archive.Store) string {
+	run, err := store.LatestRun()
+	if err != nil {
+		log.Printf("latest sync run lookup failed: %v", err)
+		return "上次收集：暂无"
+	}
+	if run == nil || run.FinishedAt == "" {
+		return "上次收集：暂无"
+	}
+	finished, err := time.Parse(time.RFC3339Nano, run.FinishedAt)
+	if err != nil {
+		log.Printf("parse sync finished_at %q: %v", run.FinishedAt, err)
+		return "上次收集：暂无"
+	}
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.FixedZone("Asia/Shanghai", 8*60*60)
+	}
+	return "上次收集：" + finished.In(loc).Format("2006-01-02 15:04")
 }
 
 // handleMirrorJump redirects a pasted source-site link to its archived mirror
@@ -1225,7 +1250,7 @@ article.item h2 a:hover{color:var(--primary);text-decoration:none}
 </nav>{{end}}
 </main>
 </div>
-{{if .DiskOK}}<footer class="footer"><span>{{.DiskText}}</span></footer>{{end}}
+{{if .DiskOK}}<footer class="footer"><span>{{.DiskText}} · {{.SyncText}}</span></footer>{{end}}
 <script>
 (function(){var input=document.getElementById("site-search");if(!input)return;var items=document.querySelectorAll(".site-list li");input.addEventListener("input",function(){var kw=input.value.trim().toLowerCase();for(var i=0;i<items.length;i++){items[i].style.display=!kw||items[i].textContent.toLowerCase().indexOf(kw)>-1?"":"none"}})})();
 </script>

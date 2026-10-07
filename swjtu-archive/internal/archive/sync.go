@@ -92,19 +92,44 @@ func NewSyncer(store *Store, client *sdk.Client, opts SyncOptions) *Syncer {
 func (s *Syncer) Store() *Store { return s.store }
 
 // Sync performs one complete, resumable synchronization pass. A failed feed
-// is recorded in the result while other feeds continue.
+// is recorded in the result while other feeds continue. When
+// FEISHU_WEBHOOK_URL is set, a run with failures reports a summary to the
+// Feishu webhook, and a severe error (revoked object-store credentials, auth
+// failure) aborts the run immediately with an alert.
 func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 	started := time.Now()
 	runID, err := s.store.StartRun(started)
 	if err != nil {
 		return SyncResult{}, err
 	}
+	collector := newSyncErrorCollector()
+	// runCtx carries the abort triggered by a severe error; without one it
+	// behaves exactly like the parent ctx.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	var severeMu sync.Mutex
+	var severeErr error
+	claimSevere := func(err error) bool {
+		severeMu.Lock()
+		defer severeMu.Unlock()
+		if severeErr != nil {
+			return false
+		}
+		severeErr = err
+		return true
+	}
+
 	result := SyncResult{RunID: runID}
 	feeds := sdk.Feeds()
 	for _, feed := range feeds {
 		if err := s.store.UpsertFeed(feed, started); err != nil {
 			result.Failures++
 			result.Errors = append(result.Errors, fmt.Sprintf("保存 feed %s: %v", feed.ID, err))
+			if severeSyncError(err.Error()) && claimSevere(err) {
+				notifyFeishu(s.opts.Logger, buildSevereAlertMessage(runID, err.Error(), result, started, time.Now()))
+				cancelRun()
+				break
+			}
 		}
 	}
 
@@ -116,7 +141,10 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 		go func() {
 			defer wg.Done()
 			for feed := range jobs {
-				feedResult, feedErr := s.syncFeedSafe(ctx, feed, started)
+				if runCtx.Err() != nil {
+					return
+				}
+				feedResult, feedErr := s.syncFeedSafe(runCtx, feed, started)
 				resultMu.Lock()
 				result.Feeds++
 				result.Articles += feedResult.Articles
@@ -126,17 +154,33 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 					result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", feed.ID, feedErr))
 				}
 				result.Errors = append(result.Errors, feedResult.Errors...)
+				severe := ""
+				if feedErr != nil && severeSyncError(feedErr.Error()) {
+					severe = fmt.Sprintf("%s: %v", feed.ID, feedErr)
+				}
+				for _, message := range feedResult.Errors {
+					if severe == "" && severeSyncError(message) {
+						severe = message
+					}
+				}
 				resultMu.Unlock()
+				if severe != "" && claimSevere(errors.New(severe)) {
+					// Bad credentials fail every remaining feed too; stop
+					// the run and alert now instead of letting the whole
+					// pass limp to its end.
+					cancelRun()
+					notifyFeishu(s.opts.Logger, buildSevereAlertMessage(runID, severe, result, started, time.Now()))
+				}
 			}
 		}()
 	}
 	for _, feed := range feeds {
 		select {
 		case jobs <- feed:
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			break
 		}
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			break
 		}
 	}
@@ -145,9 +189,16 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 
 	status := "success"
 	var runErr error
-	if ctx.Err() != nil {
+	if runCtx.Err() != nil {
 		status = "canceled"
-		runErr = ctx.Err()
+		runErr = runCtx.Err()
+		severeMu.Lock()
+		severe := severeErr
+		severeMu.Unlock()
+		if severe != nil {
+			status = "failed"
+			runErr = fmt.Errorf("severe error, sync aborted: %w", severe)
+		}
 	} else if result.Failures > 0 {
 		status = "partial"
 		if len(result.Errors) > 0 {
@@ -168,6 +219,18 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 	}
 	if s.opts.Logger != nil {
 		s.opts.Logger.Printf("sync run=%d status=%s feeds=%d articles=%d resources=%d failures=%d", runID, status, result.Feeds, result.Articles, result.Resources, result.Failures)
+	}
+	if result.Failures > 0 {
+		for _, message := range result.Errors {
+			collector.add(message)
+		}
+		notifyFeishu(s.opts.Logger, buildSyncSummaryMessage(result, started, time.Now(), collector.snapshot()))
+	}
+	severeMu.Lock()
+	severe := severeErr
+	severeMu.Unlock()
+	if severe != nil {
+		return result, fmt.Errorf("severe error, sync aborted: %w", severe)
 	}
 	return result, ctx.Err()
 }
