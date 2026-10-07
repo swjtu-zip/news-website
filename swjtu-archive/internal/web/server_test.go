@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -517,5 +518,94 @@ func TestCacheTags(t *testing.T) {
 	want := "article,article-" + strconv.FormatInt(id, 10)
 	if got := recorder.Header().Get("Cache-Tag"); got != want {
 		t.Errorf("article Cache-Tag = %q, want %q", got, want)
+	}
+}
+
+func TestSitemapAndRobots(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	rawPath, rawHash, err := store.SaveRaw([]byte("raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ url, published string }{
+		{"https://news.swjtu.edu.cn/2026-01a.htm", "2026-01-05"},
+		{"https://news.swjtu.edu.cn/2026-01b.htm", "2026-01-21"},
+		{"https://news.swjtu.edu.cn/2026-02a.htm", "2026-02-01"},
+	} {
+		if _, err := store.UpsertArticle(archive.ArticleInput{Feed: feed, Item: sdk.NewsItem{Title: "测试文章", URL: item.url, PublishedAt: item.published}, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now(), Article: &sdk.Article{Title: "测试文章", Content: "正文"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := NewServer(store).Handler()
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/sitemap.xml", nil))
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "application/xml; charset=utf-8" {
+		t.Fatalf("sitemap index: %d %q", recorder.Code, recorder.Header().Get("Content-Type"))
+	}
+	var index sitemapIndex
+	if err := xml.Unmarshal(recorder.Body.Bytes(), &index); err != nil {
+		t.Fatalf("sitemap index is not valid XML: %v\n%s", err, recorder.Body.String())
+	}
+	if index.Xmlns != sitemapNamespace {
+		t.Fatalf("sitemap index xmlns = %q", index.Xmlns)
+	}
+	locs := make([]string, 0, len(index.Sitemaps))
+	for _, ref := range index.Sitemaps {
+		locs = append(locs, ref.Loc)
+	}
+	wantLocs := []string{
+		"http://example.com/sitemap/pages.xml",
+		"http://example.com/sitemap/2026-01.xml",
+		"http://example.com/sitemap/2026-02.xml",
+	}
+	if !slices.Equal(locs, wantLocs) {
+		t.Fatalf("sitemap index locs = %#v, want %#v", locs, wantLocs)
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/sitemap/2026-01.xml", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("monthly sitemap: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var set sitemapURLSet
+	if err := xml.Unmarshal(recorder.Body.Bytes(), &set); err != nil {
+		t.Fatalf("monthly sitemap is not valid XML: %v\n%s", err, recorder.Body.String())
+	}
+	if len(set.URLs) != 2 || set.URLs[0].Loc != "http://example.com/article/1" || set.URLs[0].LastMod != "2026-01-05" ||
+		set.URLs[1].Loc != "http://example.com/article/2" || set.URLs[1].LastMod != "2026-01-21" {
+		t.Fatalf("monthly sitemap URLs = %#v", set.URLs)
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/sitemap/pages.xml", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("pages sitemap: %d", recorder.Code)
+	}
+	set = sitemapURLSet{}
+	if err := xml.Unmarshal(recorder.Body.Bytes(), &set); err != nil {
+		t.Fatalf("pages sitemap is not valid XML: %v", err)
+	}
+	if len(set.URLs) != 3 || set.URLs[0].Loc != "http://example.com/" {
+		t.Fatalf("pages sitemap URLs = %#v", set.URLs)
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/robots.txt", nil))
+	if body := recorder.Body.String(); recorder.Code != http.StatusOK || !strings.Contains(body, "Sitemap: http://example.com/sitemap.xml") {
+		t.Fatalf("robots.txt: %d %q", recorder.Code, body)
+	}
+
+	for _, path := range []string{"/sitemap/2026-13.xml", "/sitemap/nonsense.xml", "/sitemap/2026-01-1.xml"} {
+		recorder = httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s: got %d, want 404", path, recorder.Code)
+		}
 	}
 }

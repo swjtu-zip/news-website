@@ -1235,6 +1235,128 @@ func (s *Store) MonthBounds() (string, string, error) {
 	return lo.String, hi.String, nil
 }
 
+// SitemapMonth describes one publication month of archived articles for
+// sitemap generation.
+type SitemapMonth struct {
+	Month    string // YYYY-MM
+	Articles int
+	LastMod  string // newest publication date in the month, YYYY-MM-DD
+}
+
+// SitemapArticle is the sitemap-relevant slice of an archived article.
+type SitemapArticle struct {
+	ID      int64
+	LastMod string // publication date, YYYY-MM-DD
+}
+
+// SitemapMonths returns every publication month that holds at least one dated
+// article, oldest first, with the article count and newest publication date.
+// Like SiteFacets, the aggregation runs in Go instead of a SQL GROUP BY to
+// avoid the modernc driver's intermittent SQLITE_IOERR on temporary B-trees.
+func (s *Store) SitemapMonths() ([]SitemapMonth, error) {
+	counts := make(map[string]int)
+	newest := make(map[string]string)
+	err := retrySQLiteBusy(func() error {
+		counts = make(map[string]int)
+		newest = make(map[string]string)
+		rows, err := s.db.Query(`SELECT substr(published_at,1,7), published_at FROM articles WHERE published_at >= '1990'`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var month, published string
+			if err := rows.Scan(&month, &published); err != nil {
+				return err
+			}
+			if !validYearMonth(month) {
+				continue
+			}
+			counts[month]++
+			if published > newest[month] {
+				newest[month] = published
+			}
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	months := make([]SitemapMonth, 0, len(counts))
+	for month, count := range counts {
+		months = append(months, SitemapMonth{Month: month, Articles: count, LastMod: datePart(newest[month])})
+	}
+	sort.Slice(months, func(i, j int) bool { return months[i].Month < months[j].Month })
+	return months, nil
+}
+
+// SitemapArticles returns archived article IDs published in the given
+// YYYY-MM month, ordered by ID, for one page of a monthly sitemap file.
+func (s *Store) SitemapArticles(month string, offset, limit int) ([]SitemapArticle, error) {
+	if !validYearMonth(month) || offset < 0 || limit < 1 {
+		return nil, nil
+	}
+	articles := make([]SitemapArticle, 0, limit)
+	err := retrySQLiteBusy(func() error {
+		articles = articles[:0]
+		rows, err := s.db.Query(`SELECT id, published_at FROM articles
+WHERE published_at >= ? AND published_at < ? ORDER BY id LIMIT ? OFFSET ?`,
+			month+"-01", monthAfter(month)+"-01", limit, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item SitemapArticle
+			var published string
+			if err := rows.Scan(&item.ID, &published); err != nil {
+				return err
+			}
+			item.LastMod = datePart(published)
+			articles = append(articles, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return articles, nil
+}
+
+func validYearMonth(value string) bool {
+	if len(value) != 7 || value[4] != '-' {
+		return false
+	}
+	for i, c := range value {
+		if i == 4 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return value[5:7] >= "01" && value[5:7] <= "12"
+}
+
+// monthAfter returns the YYYY-MM month following the given one.
+func monthAfter(value string) string {
+	year, month := 0, 0
+	_, _ = fmt.Sscanf(value, "%d-%d", &year, &month)
+	if month == 12 {
+		year, month = year+1, 1
+	} else {
+		month++
+	}
+	return fmt.Sprintf("%04d-%02d", year, month)
+}
+
+func datePart(value string) string {
+	if len(value) >= 10 {
+		return value[:10]
+	}
+	return value
+}
+
 // SiteFacet is a per-source article count used to render filter sidebars.
 type SiteFacet struct {
 	SiteID   string `json:"site_id"`

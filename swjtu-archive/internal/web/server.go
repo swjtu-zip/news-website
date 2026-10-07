@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"html/template"
@@ -145,6 +146,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/go", s.handleMirrorJump)
 	mux.HandleFunc("/help/mcp", s.handleMCPGuide)
 	mux.HandleFunc("/open-data", s.handleOpenData)
+	mux.HandleFunc("/sitemap.xml", s.handleSitemapIndex)
+	mux.HandleFunc("/sitemap/", s.handleSitemapMonth)
+	mux.HandleFunc("/robots.txt", s.handleRobots)
 	mux.Handle("/mcp", mcp.NewHandler(s.store, s.assetBaseURL))
 	mux.HandleFunc("/", s.handleIndex)
 	return withCache(withCORS(mux))
@@ -473,6 +477,159 @@ func (s *Server) handleOpenData(w http.ResponseWriter, r *http.Request) {
 	if err := openDataTemplate.Execute(w, nil); err != nil {
 		return
 	}
+}
+
+// sitemapURLsPerFile caps one sitemap file at the protocol's 50,000-URL
+// limit; months larger than that are split into numbered files.
+const sitemapURLsPerFile = 50000
+
+const sitemapNamespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+
+type sitemapURL struct {
+	Loc     string `xml:"loc"`
+	LastMod string `xml:"lastmod,omitempty"`
+}
+
+type sitemapURLSet struct {
+	XMLName xml.Name     `xml:"urlset"`
+	Xmlns   string       `xml:"xmlns,attr"`
+	URLs    []sitemapURL `xml:"url"`
+}
+
+type sitemapRef struct {
+	Loc     string `xml:"loc"`
+	LastMod string `xml:"lastmod,omitempty"`
+}
+
+type sitemapIndex struct {
+	XMLName  xml.Name     `xml:"sitemapindex"`
+	Xmlns    string       `xml:"xmlns,attr"`
+	Sitemaps []sitemapRef `xml:"sitemap"`
+}
+
+// handleSitemapIndex serves /sitemap.xml: a sitemap index pointing at one
+// sitemap file per publication month plus the static pages file. Months are
+// derived from the archive database on every request, so new and removed
+// articles are reflected as soon as a sync run finishes.
+func (s *Server) handleSitemapIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/sitemap.xml" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	months, err := s.store.SitemapMonths()
+	if err != nil {
+		log.Printf("sitemap month query failed: %v", err)
+		http.Error(w, "archive query failed", http.StatusInternalServerError)
+		return
+	}
+	base := requestBase(r)
+	index := sitemapIndex{Xmlns: sitemapNamespace}
+	index.Sitemaps = append(index.Sitemaps, sitemapRef{Loc: base + "/sitemap/pages.xml"})
+	for _, month := range months {
+		files := (month.Articles + sitemapURLsPerFile - 1) / sitemapURLsPerFile
+		if files < 1 {
+			files = 1
+		}
+		for part := 1; part <= files; part++ {
+			index.Sitemaps = append(index.Sitemaps, sitemapRef{
+				Loc: base + sitemapMonthPath(month.Month, part), LastMod: month.LastMod,
+			})
+		}
+	}
+	writeSitemapXML(w, index)
+}
+
+// sitemapMonthPath builds "/sitemap/YYYY-MM.xml", adding a "-N" suffix when a
+// single month needs more than one file.
+func sitemapMonthPath(month string, part int) string {
+	if part <= 1 {
+		return "/sitemap/" + month + ".xml"
+	}
+	return fmt.Sprintf("/sitemap/%s-%d.xml", month, part)
+}
+
+// handleSitemapMonth serves "/sitemap/YYYY-MM.xml" (or "/sitemap/YYYY-MM-N.xml"
+// for a month that overflows one file) with that month's article pages, and
+// "/sitemap/pages.xml" with the site's static pages.
+func (s *Server) handleSitemapMonth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/sitemap/")
+	if !strings.HasSuffix(name, ".xml") || strings.Contains(name, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	name = strings.TrimSuffix(name, ".xml")
+	base := requestBase(r)
+	if name == "pages" {
+		set := sitemapURLSet{Xmlns: sitemapNamespace}
+		for _, path := range []string{"/", "/help/mcp", "/open-data"} {
+			set.URLs = append(set.URLs, sitemapURL{Loc: base + path})
+		}
+		writeSitemapXML(w, set)
+		return
+	}
+	month, part := name, 1
+	if len(name) > 7 {
+		month = name[:7]
+		suffix, ok := strings.CutPrefix(name[7:], "-")
+		parsed, err := strconv.Atoi(suffix)
+		if !ok || err != nil || parsed < 2 {
+			http.NotFound(w, r)
+			return
+		}
+		part = parsed
+	}
+	if !validMonth(month) {
+		http.NotFound(w, r)
+		return
+	}
+	articles, err := s.store.SitemapArticles(month, (part-1)*sitemapURLsPerFile, sitemapURLsPerFile)
+	if err != nil {
+		log.Printf("sitemap article query failed: %v", err)
+		http.Error(w, "archive query failed", http.StatusInternalServerError)
+		return
+	}
+	set := sitemapURLSet{Xmlns: sitemapNamespace}
+	for _, article := range articles {
+		set.URLs = append(set.URLs, sitemapURL{
+			Loc: base + "/article/" + strconv.FormatInt(article.ID, 10), LastMod: article.LastMod,
+		})
+	}
+	writeSitemapXML(w, set)
+}
+
+// handleRobots advertises the sitemap at the site root.
+func (s *Server) handleRobots(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/robots.txt" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "User-agent: *\nAllow: /\n\nSitemap: %s/sitemap.xml\n", requestBase(r))
+}
+
+func writeSitemapXML(w http.ResponseWriter, value any) {
+	body, err := xml.MarshalIndent(value, "", "  ")
+	if err != nil {
+		http.Error(w, "sitemap encoding failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(xml.Header))
+	_, _ = w.Write(body)
+	_, _ = w.Write([]byte("\n"))
 }
 
 func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
@@ -1067,6 +1224,11 @@ func responseCachePolicy(r *http.Request, status int) (string, string) {
 	// ("article", "article-<id>"). API responses are handled by the branch
 	// below with a short TTL.
 	if r.URL.Path == "/" {
+		return indexCacheControl, indexCDNCacheControl
+	}
+	if r.URL.Path == "/sitemap.xml" ||
+		strings.HasPrefix(r.URL.Path, "/sitemap/") ||
+		r.URL.Path == "/robots.txt" {
 		return indexCacheControl, indexCDNCacheControl
 	}
 	if r.URL.Path == "/help/mcp" ||

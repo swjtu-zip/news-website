@@ -547,3 +547,70 @@ func TestNormalizePublishedAt(t *testing.T) {
 		}
 	}
 }
+
+func TestSitemapMonthsAndArticles(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	rawPath, rawHash, err := store.SaveRaw([]byte("raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := []struct{ url, published string }{
+		{"https://news.swjtu.edu.cn/2026-01a.htm", "2026-01-05"},
+		{"https://news.swjtu.edu.cn/2026-01b.htm", "2026-01-20 09:30:00"},
+		{"https://news.swjtu.edu.cn/2026-02a.htm", "2026-02-01"},
+		{"https://news.swjtu.edu.cn/undated.htm", ""},
+	}
+	ids := make(map[string]int64, len(inputs))
+	for _, input := range inputs {
+		id, err := store.UpsertArticle(ArticleInput{Feed: feed, Item: sdk.NewsItem{Title: "t", URL: input.url, PublishedAt: input.published}, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now(), Article: &sdk.Article{Title: "t", Content: "正文"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[input.url] = id
+	}
+
+	months, err := store.SitemapMonths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []SitemapMonth{
+		{Month: "2026-01", Articles: 2, LastMod: "2026-01-20"},
+		{Month: "2026-02", Articles: 1, LastMod: "2026-02-01"},
+	}
+	if len(months) != len(want) {
+		t.Fatalf("months = %#v, want %#v", months, want)
+	}
+	for i := range want {
+		if months[i] != want[i] {
+			t.Fatalf("months[%d] = %#v, want %#v", i, months[i], want[i])
+		}
+	}
+
+	articles, err := store.SitemapArticles("2026-01", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(articles) != 2 || articles[0].ID != ids["https://news.swjtu.edu.cn/2026-01a.htm"] || articles[0].LastMod != "2026-01-05" ||
+		articles[1].ID != ids["https://news.swjtu.edu.cn/2026-01b.htm"] || articles[1].LastMod != "2026-01-20" {
+		t.Fatalf("articles = %#v", articles)
+	}
+	page, err := store.SitemapArticles("2026-01", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].ID != ids["https://news.swjtu.edu.cn/2026-01b.htm"] {
+		t.Fatalf("paged articles = %#v", page)
+	}
+	if invalid, err := store.SitemapArticles("2026-13", 0, 10); err != nil || len(invalid) != 0 {
+		t.Fatalf("invalid month = %#v, %v", invalid, err)
+	}
+	if got, want := datePart("2026-01-20 09:30:00"), "2026-01-20"; got != want {
+		t.Fatalf("datePart = %q, want %q", got, want)
+	}
+}
