@@ -19,7 +19,6 @@ go run ./cmd/swjtu-archive
 | `SWJTU_ARCHIVE_INTERVAL` | `30m` | 自动同步间隔 |
 | `SWJTU_ARCHIVE_BACKFILL` | `8760h` | 首次/每次同步的回溯窗口 |
 | `SWJTU_ARCHIVE_MAX_PAGES` | `1000` | 每个 feed 最多抓取页数 |
-| `SWJTU_ARCHIVE_REFRESH_AFTER` | `24h` | 文章详情与资源的刷新间隔 |
 | `SWJTU_ARCHIVE_SYNC_ON_START` | `true` | 是否启动时同步 |
 | `SWJTU_ARCHIVE_SYNC_TIMES` | 空 | 每日定时触发点（北京时间 `HH:MM`，逗号分隔），设置后覆盖 `INTERVAL` |
 | `SWJTU_ARCHIVE_SYNC_TOKEN` | 空 | 手动触发接口的 Bearer token；不设置则接口不要求鉴权 |
@@ -41,12 +40,16 @@ curl -X POST -H "Authorization: Bearer $SWJTU_ARCHIVE_SYNC_TOKEN" http://localho
 
 已有同步在跑时接口返回 409；未配置 token 时接口不鉴权，仅建议在内网使用。
 
+## 文章版本
+
+文章首次抓取 14 天后会再抓取一次（仅此一次）。若标题、正文或图片/附件列表有变化，原先的内容保存为第 1 版，新内容成为第 2 版并作为默认展示；文章页可在版本间切换（`/article/{id}?v=1`），旧版本页面带 `noindex`。内容没有变化则不产生版本。
+
 ## 访问
 
 - Web：`http://localhost:8080/`
 - API：`GET /api/v1/articles?q=人工智能&site=scai&from=2025-01-01&page=1`
 - 站点：`GET /api/v1/feeds`
-- 详情：`GET /api/v1/articles/{id}`
+- 详情：`GET /api/v1/articles/{id}`（`?version=N` 取指定版本）
 - 资源：`GET /assets/{id}`
 - 同步状态：`GET /api/v1/sync/status`
 - MCP：`http://localhost:8080/mcp`（Streamable HTTP）

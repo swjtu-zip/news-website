@@ -263,3 +263,44 @@ func TestArticleHasAnyContent(t *testing.T) {
 	}
 }
 
+func TestWaitRequestGapsPerHost(t *testing.T) {
+	syncer := NewSyncer(nil, nil, SyncOptions{RequestGap: time.Hour})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, raw := range []string{"https://a.swjtu.edu.cn/1", "https://B.swjtu.edu.cn/1"} {
+		if err := syncer.waitRequest(ctx, raw); err != nil {
+			t.Fatalf("first request to a host must not wait: %v", err)
+		}
+	}
+	short, cancelShort := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancelShort()
+	if err := syncer.waitRequest(short, "https://b.swjtu.edu.cn/2"); err == nil {
+		t.Fatal("second request to the same host must wait for the gap")
+	}
+}
+
+func TestFullListingDueOncePerInterval(t *testing.T) {
+	syncer := NewSyncer(nil, nil, SyncOptions{FullListEvery: 24 * time.Hour})
+	now := time.Now()
+	if !syncer.fullListDue("feed", now) {
+		t.Fatal("first listing of a feed must be full")
+	}
+	syncer.markFullListed("feed", now)
+	if syncer.fullListDue("feed", now.Add(time.Hour)) {
+		t.Fatal("full listing must not repeat within FullListEvery")
+	}
+	if !syncer.fullListDue("feed", now.Add(25*time.Hour)) {
+		t.Fatal("full listing must recur after FullListEvery")
+	}
+}
+
+func TestArticleResourceURLsMatchesArchivedRows(t *testing.T) {
+	article := &sdk.Article{
+		Images:      []string{"https://a/1.png", "", "data:image/png;base64,x", "https://a/1.png"},
+		Attachments: []sdk.Attachment{{Name: "x", URL: "https://a/1.png"}, {Name: "y", URL: "https://a/2.pdf"}},
+	}
+	got := articleResourceURLs(article)
+	if len(got) != 2 || got[0] != "https://a/1.png" || got[1] != "https://a/2.pdf" {
+		t.Fatalf("articleResourceURLs = %v", got)
+	}
+}

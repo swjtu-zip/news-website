@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -88,6 +89,28 @@ CREATE TABLE IF NOT EXISTS resources (
 
 CREATE INDEX IF NOT EXISTS resources_article_idx ON resources(article_id);
 
+-- article_versions keeps every distinct fetch of an article whose one-time
+-- re-fetch found changed content. The articles row always mirrors the latest
+-- version; articles that never changed have no rows here.
+CREATE TABLE IF NOT EXISTS article_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    published_at TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    content_html TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    photographer TEXT NOT NULL DEFAULT '',
+    editor TEXT NOT NULL DEFAULT '',
+    raw_path TEXT NOT NULL DEFAULT '',
+    raw_sha256 TEXT NOT NULL DEFAULT '',
+    resource_urls TEXT NOT NULL DEFAULT '[]',
+    fetched_at TEXT NOT NULL,
+    UNIQUE(article_id, version)
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -148,6 +171,10 @@ func Open(dbPath string) (*Store, error) {
 		store.Close()
 		return nil, fmt.Errorf("migrate article type: %w", err)
 	}
+	if err := ensureRefetchedColumn(db); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("migrate article refetch marker: %w", err)
+	}
 	if err := normalizeLegacyPublicationDates(db); err != nil {
 		store.Close()
 		return nil, fmt.Errorf("migrate legacy publication dates: %w", err)
@@ -180,6 +207,26 @@ func ensureArticleTypeColumn(db *sql.DB) error {
 		return nil
 	}
 	_, err := db.Exec(`ALTER TABLE articles ADD COLUMN article_type TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// ensureRefetchedColumn adds the one-time re-fetch marker. Archives from
+// before it re-fetched every article daily, so a legacy row whose last fetch
+// is already 14 days past its first one counts as re-fetched; younger rows
+// still get their single re-fetch.
+func ensureRefetchedColumn(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('articles') WHERE name='refetched_at'`).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE articles ADD COLUMN refetched_at TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`UPDATE articles SET refetched_at=last_fetched_at
+WHERE last_fetched_at<>'' AND julianday(last_fetched_at) >= julianday(first_seen_at) + 14`)
 	return err
 }
 
@@ -516,22 +563,123 @@ VALUES (?, ?, ?, ?, ?)`, id, title, input.Article.Content, input.Article.Source,
 	return id, nil
 }
 
-// ArticleFresh reports whether an article was fetched recently enough to skip
-// another detail request while still refreshing old entries periodically.
-func (s *Store) ArticleFresh(canonicalURL string, now time.Time, refreshAfter time.Duration) (bool, error) {
-	var fetched string
-	err := s.db.QueryRow("SELECT last_fetched_at FROM articles WHERE canonical_url = ?", canonicalURL).Scan(&fetched)
+// ArticleFetchState describes an archived article for the re-fetch decision.
+type ArticleFetchState struct {
+	Exists         bool
+	FirstFetchedAt time.Time
+	Refetched      bool
+}
+
+// FetchState reports whether an article is archived, when it was first
+// fetched, and whether its one-time re-fetch already happened.
+func (s *Store) FetchState(canonicalURL string) (ArticleFetchState, error) {
+	var firstSeen, refetched string
+	err := s.db.QueryRow("SELECT first_seen_at, refetched_at FROM articles WHERE canonical_url = ?", canonicalURL).Scan(&firstSeen, &refetched)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return ArticleFetchState{}, nil
 	}
 	if err != nil {
-		return false, err
+		return ArticleFetchState{}, err
 	}
-	when, err := time.Parse(time.RFC3339Nano, fetched)
+	// first_seen_at is written by the first successful fetch. An unparsable
+	// value yields the zero time, which simply makes the re-fetch due.
+	first, _ := time.Parse(time.RFC3339Nano, firstSeen)
+	return ArticleFetchState{Exists: true, FirstFetchedAt: first, Refetched: refetched != ""}, nil
+}
+
+// SaveRefetch stores the one-time re-fetch of an archived article. When the
+// title, text or resource set changed, the archived copy is kept as version 1
+// and the new fetch becomes version 2 and the current article; otherwise only
+// the re-fetch is recorded. It reports whether a new version was stored.
+func (s *Store) SaveRefetch(input ArticleInput, resourceURLs []string) (int64, bool, error) {
+	if input.Article == nil {
+		return 0, false, errors.New("article is nil")
+	}
+	var id int64
+	var title, content string
+	if err := s.db.QueryRow("SELECT id, title, content FROM articles WHERE canonical_url = ?", input.Item.URL).Scan(&id, &title, &content); err != nil {
+		return 0, false, fmt.Errorf("read archived article: %w", err)
+	}
+	oldURLs, err := s.articleResourceURLs(id)
 	if err != nil {
-		return false, nil
+		return 0, false, err
 	}
-	return now.Sub(when) < refreshAfter, nil
+	newTitle := input.Article.Title
+	if newTitle == "" {
+		newTitle = input.Item.Title
+	}
+	now := input.FetchedAt.UTC().Format(time.RFC3339Nano)
+	if compactText(title) == compactText(newTitle) && compactText(content) == compactText(input.Article.Content) && sameStringSet(oldURLs, resourceURLs) {
+		_, err := s.db.Exec("UPDATE articles SET refetched_at=?, last_seen_at=? WHERE id=?", now, now, id)
+		return id, false, err
+	}
+	// Snapshot the archived copy before UpsertArticle overwrites it. A
+	// failure after this point leaves refetched_at empty, so the next run
+	// retries; INSERT OR IGNORE keeps that retry from duplicating version 1.
+	if err := s.snapshotVersion(id, 1, oldURLs, ""); err != nil {
+		return 0, false, err
+	}
+	if _, err := s.UpsertArticle(input); err != nil {
+		return 0, false, err
+	}
+	if err := s.snapshotVersion(id, 2, resourceURLs, now); err != nil {
+		return 0, false, err
+	}
+	_, err = s.db.Exec("UPDATE articles SET refetched_at=? WHERE id=?", now, id)
+	return id, true, err
+}
+
+// snapshotVersion copies the current articles row into article_versions.
+// An empty fetchedAt uses the row's last_fetched_at.
+func (s *Store) snapshotVersion(articleID int64, version int, resourceURLs []string, fetchedAt string) error {
+	urls, err := json.Marshal(resourceURLs)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT OR IGNORE INTO article_versions
+(article_id, version, title, source, published_at, content, content_html, author, photographer, editor,
+ raw_path, raw_sha256, resource_urls, fetched_at)
+SELECT id, ?, title, source, published_at, content, content_html, author, photographer, editor,
+ raw_path, raw_sha256, ?, CASE WHEN ? = '' THEN last_fetched_at ELSE ? END
+FROM articles WHERE id = ?`, version, string(urls), fetchedAt, fetchedAt, articleID)
+	if err != nil {
+		return fmt.Errorf("save article version %d: %w", version, err)
+	}
+	return nil
+}
+
+func (s *Store) articleResourceURLs(articleID int64) ([]string, error) {
+	rows, err := s.db.Query("SELECT original_url FROM resources WHERE article_id = ? ORDER BY id", articleID)
+	if err != nil {
+		return nil, fmt.Errorf("read article resources: %w", err)
+	}
+	defer rows.Close()
+	var urls []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		urls = append(urls, value)
+	}
+	return urls, rows.Err()
+}
+
+func compactText(value string) string { return strings.Join(strings.Fields(value), " ") }
+
+func sameStringSet(a, b []string) bool {
+	set := make(map[string]bool, len(a))
+	for _, value := range a {
+		set[value] = true
+	}
+	other := make(map[string]bool, len(b))
+	for _, value := range b {
+		if !set[value] {
+			return false
+		}
+		other[value] = true
+	}
+	return len(other) == len(set)
 }
 
 func (s *Store) TouchArticle(canonicalURL string, now time.Time) error {
@@ -953,6 +1101,16 @@ type ArticleRecord struct {
 	LastFetchedAt string           `json:"last_fetched_at,omitempty"`
 	LastError     string           `json:"last_error,omitempty"`
 	Resources     []ResourceRecord `json:"resources,omitempty"`
+	// Version is the version shown and Versions lists every stored version;
+	// both are empty for articles that never changed on re-fetch.
+	Version  int              `json:"version,omitempty"`
+	Versions []ArticleVersion `json:"versions,omitempty"`
+}
+
+// ArticleVersion identifies one stored fetch of an article.
+type ArticleVersion struct {
+	Version   int    `json:"version"`
+	FetchedAt string `json:"fetched_at"`
 }
 
 // FindArticleIDByURL resolves a source-site URL to the archived article ID.
@@ -1036,7 +1194,15 @@ func urlLookupCandidates(raw string) []string {
 	return out
 }
 
+// GetArticle loads the latest version of an article.
 func (s *Store) GetArticle(id int64) (*ArticleRecord, error) {
+	return s.GetArticleVersion(id, 0)
+}
+
+// GetArticleVersion loads one stored version of an article (0 = latest),
+// with resources limited to those that version referenced. It returns
+// os.ErrNotExist for a version that does not exist.
+func (s *Store) GetArticleVersion(id int64, version int) (*ArticleRecord, error) {
 	item := &ArticleRecord{}
 	err := retrySQLiteBusy(func() error {
 		row := s.db.QueryRow(`SELECT id, title, source, site_id, site_name, feed_id, category, article_type, published_at,
@@ -1075,7 +1241,82 @@ byte_size, sha256, status, error FROM resources WHERE article_id=? ORDER BY id`,
 		return nil, err
 	}
 	item.Resources = resources
+	if err := s.applyVersion(item, version); err != nil {
+		return nil, err
+	}
 	return item, nil
+}
+
+// applyVersion overlays the requested version onto a loaded article.
+func (s *Store) applyVersion(item *ArticleRecord, version int) error {
+	var versions []ArticleVersion
+	err := retrySQLiteBusy(func() error {
+		versions = versions[:0]
+		rows, err := s.db.Query("SELECT version, fetched_at FROM article_versions WHERE article_id=? ORDER BY version", item.ID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var entry ArticleVersion
+			if err := rows.Scan(&entry.Version, &entry.FetchedAt); err != nil {
+				return err
+			}
+			versions = append(versions, entry)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return err
+	}
+	if len(versions) == 0 {
+		if version != 0 {
+			return os.ErrNotExist
+		}
+		return nil
+	}
+	latest := versions[len(versions)-1].Version
+	if version == 0 {
+		version = latest
+	}
+	var urlsJSON string
+	err = retrySQLiteBusy(func() error {
+		row := s.db.QueryRow(`SELECT title, source, published_at, content, content_html, author, photographer, editor,
+raw_path, raw_sha256, resource_urls, fetched_at FROM article_versions WHERE article_id=? AND version=?`, item.ID, version)
+		if version == latest {
+			// The articles row already holds the latest version; only the
+			// resource set is needed.
+			var discard string
+			return row.Scan(&discard, &discard, &discard, &discard, &discard, &discard, &discard, &discard,
+				&discard, &discard, &urlsJSON, &discard)
+		}
+		return row.Scan(&item.Title, &item.Source, &item.PublishedAt, &item.Content, &item.ContentHTML, &item.Author,
+			&item.Photographer, &item.Editor, &item.RawPath, &item.RawSHA256, &urlsJSON, &item.LastFetchedAt)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return os.ErrNotExist
+	}
+	if err != nil {
+		return err
+	}
+	var urls []string
+	if err := json.Unmarshal([]byte(urlsJSON), &urls); err != nil {
+		return fmt.Errorf("decode version resources: %w", err)
+	}
+	keep := make(map[string]bool, len(urls))
+	for _, value := range urls {
+		keep[value] = true
+	}
+	filtered := item.Resources[:0]
+	for _, resource := range item.Resources {
+		if keep[resource.OriginalURL] {
+			filtered = append(filtered, resource)
+		}
+	}
+	item.Resources = filtered
+	item.Version = version
+	item.Versions = versions
+	return nil
 }
 
 func scanResource(scanner interface{ Scan(...any) error }) (*ResourceRecord, error) {

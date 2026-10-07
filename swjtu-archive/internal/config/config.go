@@ -27,7 +27,6 @@ type Config struct {
 	SyncOnStart       bool
 	MaxConcurrent     int
 	RequestGap        time.Duration
-	RefreshAfter      time.Duration
 	MaxResourceBytes  int64
 	SyncToken         string
 }
@@ -56,10 +55,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	gap, err := durationEnv("SWJTU_ARCHIVE_REQUEST_GAP", 350*time.Millisecond)
-	if err != nil {
-		return Config{}, err
-	}
-	refreshAfter, err := durationEnv("SWJTU_ARCHIVE_REFRESH_AFTER", 24*time.Hour)
 	if err != nil {
 		return Config{}, err
 	}
@@ -102,7 +97,6 @@ func Load() (Config, error) {
 		SyncOnStart:       syncOnStart,
 		MaxConcurrent:     maxConcurrent,
 		RequestGap:        gap,
-		RefreshAfter:      refreshAfter,
 		MaxResourceBytes:  maxBytes,
 		SyncToken:         env("SWJTU_ARCHIVE_SYNC_TOKEN", ""),
 	}, nil

@@ -609,3 +609,58 @@ func TestSitemapAndRobots(t *testing.T) {
 		}
 	}
 }
+
+func TestArticlePageSwitchesVersions(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	item := sdk.NewsItem{Title: "通知", URL: "https://news.swjtu.edu.cn/notice.htm"}
+	first := time.Now().Add(-15 * 24 * time.Hour)
+	id, err := store.UpsertArticle(archive.ArticleInput{Feed: feed, Item: item, FetchedAt: first, Article: &sdk.Article{Title: "通知", Content: "初稿", ContentHTML: "<p>初稿</p>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.SaveRefetch(archive.ArticleInput{Feed: feed, Item: item, FetchedAt: time.Now(), Article: &sdk.Article{Title: "通知", Content: "修订稿", ContentHTML: "<p>修订稿</p>"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(store).Handler()
+	get := func(target string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		return recorder
+	}
+
+	latest := get(fmt.Sprintf("/article/%d", id))
+	body := latest.Body.String()
+	if latest.Code != http.StatusOK || !strings.Contains(body, "修订稿") || strings.Contains(body, "初稿") {
+		t.Fatalf("latest page: status %d", latest.Code)
+	}
+	if !strings.Contains(body, fmt.Sprintf(`href="/article/%d?v=1"`, id)) || !strings.Contains(body, "第 2 版（最新）") {
+		t.Fatal("latest page lacks the version switcher")
+	}
+	old := get(fmt.Sprintf("/article/%d?v=1", id))
+	body = old.Body.String()
+	if old.Code != http.StatusOK || !strings.Contains(body, "初稿") || !strings.Contains(body, "查看最新版本") || !strings.Contains(body, `content="noindex"`) {
+		t.Fatalf("old version page: status %d", old.Code)
+	}
+	for _, target := range []string{fmt.Sprintf("/article/%d?v=3", id), fmt.Sprintf("/article/%d?v=x", id)} {
+		if code := get(target).Code; code != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404", target, code)
+		}
+	}
+	api := get(fmt.Sprintf("/api/v1/articles/%d?version=1", id))
+	var payload struct {
+		Content  string                   `json:"content"`
+		Version  int                      `json:"version"`
+		Versions []archive.ArticleVersion `json:"versions"`
+	}
+	if err := json.Unmarshal(api.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Content != "初稿" || payload.Version != 1 || len(payload.Versions) != 2 {
+		t.Fatalf("api version payload = %+v", payload)
+	}
+}

@@ -65,7 +65,7 @@ func main() {
 	}
 	syncer := archive.NewSyncer(store, client, archive.SyncOptions{
 		Backfill: cfg.Backfill, MaxPages: cfg.MaxPages, MaxConcurrent: cfg.MaxConcurrent,
-		RequestGap: cfg.RequestGap, RefreshAfter: cfg.RefreshAfter,
+		RequestGap:       cfg.RequestGap,
 		MaxResourceBytes: cfg.MaxResourceBytes, ResourceUploader: resourceUploader, RawUploader: rawUploader, Logger: logger,
 	})
 

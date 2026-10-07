@@ -18,11 +18,20 @@ import (
 
 // SyncOptions controls one synchronization pass.
 type SyncOptions struct {
-	Backfill         time.Duration
-	MaxPages         int
-	MaxConcurrent    int
-	RequestGap       time.Duration
-	RefreshAfter     time.Duration
+	Backfill      time.Duration
+	MaxPages      int
+	MaxConcurrent int
+	RequestGap    time.Duration
+	// RefetchAfter is how long after its first fetch an archived article is
+	// fetched once more. A changed re-fetch is stored as a new version.
+	RefetchAfter time.Duration
+	// ListWindow bounds the listing crawl between full backfill listings:
+	// most syncs only need the newest pages of each feed.
+	ListWindow time.Duration
+	// FullListEvery is how often each feed is listed across the whole
+	// Backfill window, which picks up older articles a short listing missed
+	// (for example after a failed run).
+	FullListEvery    time.Duration
 	MaxResourceBytes int64
 	ResourceUploader ResourceUploader
 	RawUploader      RawPageUploader
@@ -63,10 +72,16 @@ type Syncer struct {
 	client *sdk.Client
 	opts   SyncOptions
 
-	rateMu  sync.Mutex
-	lastReq time.Time
-	lockMu  sync.Mutex
-	locks   map[string]*sync.Mutex
+	lockMu     sync.Mutex
+	locks      map[string]*sync.Mutex
+	gates      map[string]*hostGate
+	fullListed map[string]time.Time
+}
+
+// hostGate spaces requests to one host by RequestGap.
+type hostGate struct {
+	mu   sync.Mutex
+	last time.Time
 }
 
 func NewSyncer(store *Store, client *sdk.Client, opts SyncOptions) *Syncer {
@@ -79,13 +94,22 @@ func NewSyncer(store *Store, client *sdk.Client, opts SyncOptions) *Syncer {
 	if opts.MaxConcurrent <= 0 {
 		opts.MaxConcurrent = 4
 	}
-	if opts.RefreshAfter <= 0 {
-		opts.RefreshAfter = 24 * time.Hour
+	if opts.RefetchAfter <= 0 {
+		opts.RefetchAfter = 14 * 24 * time.Hour
+	}
+	if opts.ListWindow <= 0 {
+		opts.ListWindow = 14 * 24 * time.Hour
+	}
+	if opts.FullListEvery <= 0 {
+		opts.FullListEvery = 24 * time.Hour
 	}
 	if opts.MaxResourceBytes <= 0 {
 		opts.MaxResourceBytes = 256 << 20
 	}
-	return &Syncer{store: store, client: client, opts: opts, locks: make(map[string]*sync.Mutex)}
+	return &Syncer{
+		store: store, client: client, opts: opts,
+		locks: make(map[string]*sync.Mutex), gates: make(map[string]*hostGate), fullListed: make(map[string]time.Time),
+	}
 }
 
 // Store returns the backing archive store for the read-only HTTP layer.
@@ -259,11 +283,22 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 	feedLock.Lock()
 	defer feedLock.Unlock()
 
-	if err := s.waitRequest(ctx); err != nil {
+	if err := s.waitRequest(ctx, feed.BaseURL); err != nil {
 		return feedResult{}, err
 	}
 	var result feedResult
-	items, listErr := s.client.ListFeedRange(ctx, feed, now.Add(-s.opts.Backfill), now.Add(24*time.Hour), s.opts.MaxPages)
+	// Walking a year of list pages on every run dominated sync time. Only
+	// list the full Backfill window once per FullListEvery per feed; other
+	// runs stop at ListWindow, which still catches every new article.
+	from := now.Add(-s.opts.Backfill)
+	full := s.fullListDue(feed.ID, now)
+	if !full && now.Add(-s.opts.ListWindow).After(from) {
+		from = now.Add(-s.opts.ListWindow)
+	}
+	items, listErr := s.client.ListFeedRange(ctx, feed, from, now.Add(24*time.Hour), s.opts.MaxPages)
+	if listErr == nil && full {
+		s.markFullListed(feed.ID, now)
+	}
 	if listErr != nil {
 		if ctx.Err() != nil {
 			return result, listErr
@@ -287,13 +322,16 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 		if item.Type == "" {
 			item.Type = feed.Name
 		}
-		fresh, err := s.store.ArticleFresh(item.URL, now, s.opts.RefreshAfter)
+		// An archived article is fetched once more RefetchAfter after its
+		// first fetch, to catch early corrections; after that only its
+		// listing metadata is touched.
+		state, err := s.store.FetchState(item.URL)
 		if err != nil {
 			result.Failures++
 			result.Errors = append(result.Errors, fmt.Sprintf("检查 %s: %v", item.URL, err))
 			continue
 		}
-		if fresh {
+		if state.Exists && (state.Refetched || now.Sub(state.FirstFetchedAt) < s.opts.RefetchAfter) {
 			if err := s.store.TouchArticleMetadata(item.URL, feed, item, now); err != nil {
 				result.Failures++
 				result.Errors = append(result.Errors, fmt.Sprintf("更新 %s: %v", item.URL, err))
@@ -301,7 +339,7 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 			continue
 		}
 
-		if err := s.waitRequest(ctx); err != nil {
+		if err := s.waitRequest(ctx, item.URL); err != nil {
 			return result, err
 		}
 		article, raw, err := s.client.FetchArticleSnapshot(ctx, item.URL)
@@ -339,9 +377,13 @@ func (s *Syncer) syncFeed(ctx context.Context, feed sdk.Feed, now time.Time) (fe
 			result.Errors = append(result.Errors, fmt.Sprintf("保存原文 %s: %v", item.URL, err))
 			continue
 		}
-		articleID, err := s.store.UpsertArticle(ArticleInput{
-			Feed: feed, Item: item, Article: article, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now(),
-		})
+		input := ArticleInput{Feed: feed, Item: item, Article: article, RawPath: rawPath, RawSHA256: rawHash, FetchedAt: time.Now()}
+		var articleID int64
+		if state.Exists {
+			articleID, _, err = s.store.SaveRefetch(input, articleResourceURLs(article))
+		} else {
+			articleID, err = s.store.UpsertArticle(input)
+		}
 		if err != nil {
 			result.Failures++
 			result.Errors = append(result.Errors, fmt.Sprintf("保存文章 %s: %v", item.URL, err))
@@ -420,7 +462,7 @@ func (s *Syncer) archiveResource(ctx context.Context, articleID int64, kind, res
 	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		if err := s.waitRequest(ctx); err != nil {
+		if err := s.waitRequest(ctx, resourceURL); err != nil {
 			return false, err
 		}
 		resource, err := s.client.DownloadResourceWithReferer(ctx, resourceURL, referer)
@@ -519,6 +561,26 @@ func articlePublishedAt(article *sdk.Article, item sdk.NewsItem) string {
 	return strings.TrimSpace(item.Date)
 }
 
+// articleResourceURLs lists the downloadable image and attachment URLs of an
+// article, matching the rows archiveResource records.
+func articleResourceURLs(article *sdk.Article) []string {
+	seen := make(map[string]bool)
+	var urls []string
+	add := func(value string) {
+		if value != "" && !seen[value] && isDownloadableResourceURL(value) {
+			seen[value] = true
+			urls = append(urls, value)
+		}
+	}
+	for _, image := range article.Images {
+		add(image)
+	}
+	for _, attachment := range article.Attachments {
+		add(attachment.URL)
+	}
+	return urls
+}
+
 // articleHasAnyContent reports whether a fetched article carries anything
 // worth archiving: text, HTML, images, or attachments. A detail page whose
 // parse yields none of these is a shell (deleted source page, external-link
@@ -531,6 +593,19 @@ func articleHasAnyContent(article *sdk.Article) bool {
 		strings.TrimSpace(article.ContentHTML) != "" ||
 		len(article.Images) > 0 ||
 		len(article.Attachments) > 0
+}
+
+func (s *Syncer) fullListDue(feedID string, now time.Time) bool {
+	s.lockMu.Lock()
+	defer s.lockMu.Unlock()
+	last, ok := s.fullListed[feedID]
+	return !ok || now.Sub(last) >= s.opts.FullListEvery
+}
+
+func (s *Syncer) markFullListed(feedID string, now time.Time) {
+	s.lockMu.Lock()
+	defer s.lockMu.Unlock()
+	s.fullListed[feedID] = now
 }
 
 func resourceStorageClass(kind, publishedAt string, now time.Time) string {
@@ -579,21 +654,40 @@ func (s *Syncer) siteLock(siteID string) *sync.Mutex {
 	return lock
 }
 
-func (s *Syncer) waitRequest(ctx context.Context) error {
-	s.rateMu.Lock()
-	defer s.rateMu.Unlock()
-	wait := s.opts.RequestGap - time.Since(s.lastReq)
+// waitRequest spaces requests per host. A single global gap serialized every
+// worker behind one clock, so MaxConcurrent bought almost no throughput;
+// politeness only needs to hold per source server.
+func (s *Syncer) waitRequest(ctx context.Context, rawURL string) error {
+	gate := s.hostGate(rawURL)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	wait := s.opts.RequestGap - time.Since(gate.last)
 	if wait <= 0 {
-		s.lastReq = time.Now()
+		gate.last = time.Now()
 		return nil
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		s.lastReq = time.Now()
+		gate.last = time.Now()
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (s *Syncer) hostGate(rawURL string) *hostGate {
+	host := ""
+	if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil {
+		host = strings.ToLower(u.Hostname())
+	}
+	s.lockMu.Lock()
+	defer s.lockMu.Unlock()
+	gate := s.gates[host]
+	if gate == nil {
+		gate = &hostGate{}
+		s.gates[host] = gate
+	}
+	return gate
 }

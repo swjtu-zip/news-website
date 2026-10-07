@@ -72,6 +72,29 @@ type resourceView struct {
 	URL      string
 }
 
+// versionView is one entry of the article page's version switcher.
+type versionView struct {
+	Version   int
+	FetchedAt string
+	URL       string
+	Current   bool
+	Latest    bool
+}
+
+// requestedVersion parses an optional positive version query parameter;
+// ok is false for a malformed value.
+func requestedVersion(r *http.Request, name string) (int, bool) {
+	value := r.URL.Query().Get(name)
+	if value == "" {
+		return 0, true
+	}
+	version, err := strconv.Atoi(value)
+	if err != nil || version <= 0 {
+		return 0, false
+	}
+	return version, true
+}
+
 func (s *Server) resourceURL(item *archive.ResourceRecord, base string) string {
 	if item == nil {
 		return ""
@@ -196,7 +219,12 @@ func (s *Server) handleArticle(w http.ResponseWriter, r *http.Request) {
 		notFoundJSON(w)
 		return
 	}
-	item, err := s.store.GetArticle(id)
+	version, ok := requestedVersion(r, "version")
+	if !ok {
+		notFoundJSON(w)
+		return
+	}
+	item, err := s.store.GetArticleVersion(id, version)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			notFoundJSON(w)
@@ -644,7 +672,12 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	item, err := s.store.GetArticle(id)
+	version, ok := requestedVersion(r, "v")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	item, err := s.store.GetArticleVersion(id, version)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -654,10 +687,27 @@ func (s *Server) handleArticlePage(w http.ResponseWriter, r *http.Request) {
 		ContentHTML template.HTML
 		Images      []resourceView
 		Attachments []resourceView
+		Versions    []versionView
+		OldVersion  *versionView
+		LatestURL   string
 		FirstSeenAt string
 		RenderedAt  string
 		RenderMS    string
-	}{Item: item, ContentHTML: s.safeContent(item), FirstSeenAt: formatSeenAt(item.FirstSeenAt)}
+	}{Item: item, ContentHTML: s.safeContent(item), FirstSeenAt: formatSeenAt(item.FirstSeenAt), LatestURL: fmt.Sprintf("/article/%d", id)}
+	for i, entry := range item.Versions {
+		view := versionView{
+			Version: entry.Version, FetchedAt: formatSeenAt(entry.FetchedAt), URL: data.LatestURL,
+			Current: entry.Version == item.Version, Latest: i == len(item.Versions)-1,
+		}
+		if !view.Latest {
+			view.URL = fmt.Sprintf("/article/%d?v=%d", id, entry.Version)
+		}
+		data.Versions = append(data.Versions, view)
+		if view.Current && !view.Latest {
+			old := view
+			data.OldVersion = &old
+		}
+	}
 	for _, resource := range item.Resources {
 		view := resourceView{ID: resource.ID, Filename: resource.Filename, ByteSize: resource.ByteSize, URL: s.resourceURL(&resource, requestBase(r))}
 		if resource.Kind == "image" {
@@ -851,6 +901,7 @@ func (s *Server) articleResponse(item *archive.ArticleRecord) map[string]any {
 		"content_html": string(s.safeContent(item)), "raw_sha256": item.RawSHA256,
 		"first_seen_at": item.FirstSeenAt, "last_seen_at": item.LastSeenAt,
 		"last_fetched_at": item.LastFetchedAt, "status": item.Status, "resources": resources,
+		"version": item.Version, "versions": item.Versions,
 	}
 }
 
@@ -1492,7 +1543,7 @@ h2{font-size:18px;margin:0 0 14px}
 
 var articleTemplate = template.Must(template.New("article").Parse(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{.Item.Title}} - SWJTU 新闻归档</title><style>
+<title>{{.Item.Title}} - SWJTU 新闻归档</title>{{if .OldVersion}}<meta name="robots" content="noindex">{{end}}<style>
 :root{--primary:#1a5fb4;--primary-dark:#1c4a8c;--text:#1f2329;--muted:#6b7280;--line:#e5e7eb;--bg:#f4f5f7;--card:#fff}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;font-size:16px;line-height:1.85}
@@ -1527,6 +1578,11 @@ h1{font-size:24px;line-height:1.45;text-align:center;margin:0 0 14px}
 .content td,.content th{border:1px solid var(--line);padding:8px 12px}
 .content th{background:#f8fafc}
 .content blockquote{margin:16px 0;padding:4px 18px;border-left:4px solid var(--primary);background:#f8fafc;color:#4b5563}
+.versions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:16px;font-size:13px;color:var(--muted)}
+.versions a{padding:3px 10px;border:1px solid var(--line);border-radius:99px;color:var(--text)}
+.versions a:hover{border-color:var(--primary);color:var(--primary);text-decoration:none}
+.versions a.current{border-color:var(--primary);background:#edf3fb;color:var(--primary);font-weight:600}
+.version-note{margin:14px 0 0;padding:10px 14px;border-radius:7px;background:#fff7e6;border:1px solid #f5d9a8;color:#7a5410;font-size:13.5px}
 .resources{margin-top:32px;padding-top:18px;border-top:1px solid var(--line)}
 .resources h2{font-size:16px;margin:0 0 12px}
 .resources ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
@@ -1564,6 +1620,8 @@ h1{font-size:24px;line-height:1.45;text-align:center;margin:0 0 14px}
 <main class="paper">
 <h1>{{.Item.Title}}</h1>
 <div class="meta"><span class="badge">{{.Item.SiteName}}</span><span>{{.Item.PublishedAt}}</span>{{if .Item.Type}}<span class="dot"></span><span>类型：{{.Item.Type}}</span>{{end}}{{if .Item.Source}}<span class="dot"></span><span>来源：{{.Item.Source}}</span>{{end}}{{if .Item.Author}}<span class="dot"></span><span>作者：{{.Item.Author}}</span>{{end}}{{if .Item.Photographer}}<span class="dot"></span><span>摄影：{{.Item.Photographer}}</span>{{end}}{{if .Item.Editor}}<span class="dot"></span><span>编辑：{{.Item.Editor}}</span>{{end}}{{if .FirstSeenAt}}<span class="dot"></span><span>收录：{{.FirstSeenAt}}</span>{{end}}</div>
+{{if .Versions}}<nav class="versions" aria-label="文章版本"><span>版本</span>{{range .Versions}}<a href="{{.URL}}"{{if .Current}} class="current" aria-current="page"{{end}} title="{{.FetchedAt}} 抓取">第 {{.Version}} 版{{if .Latest}}（最新）{{end}}</a>{{end}}</nav>{{end}}
+{{with .OldVersion}}<p class="version-note">正在查看 {{.FetchedAt}} 抓取的第 {{.Version}} 版，源站之后修改过这篇文章。<a href="{{$.LatestURL}}">查看最新版本</a></p>{{end}}
 <div class="content">{{.ContentHTML}}</div>
 {{if .Attachments}}<section class="resources resources-inline"><h2>附件</h2><ul>{{range .Attachments}}<li><a href="{{.URL}}" download="{{.Filename}}">{{.Filename}}<span class="size">{{.ByteSize}} bytes</span></a></li>{{end}}</ul></section>{{end}}
 </main></div>

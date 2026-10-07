@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -612,5 +613,128 @@ func TestSitemapMonthsAndArticles(t *testing.T) {
 	}
 	if got, want := datePart("2026-01-20 09:30:00"), "2026-01-20"; got != want {
 		t.Fatalf("datePart = %q, want %q", got, want)
+	}
+}
+
+func TestSaveRefetchKeepsChangedVersions(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	item := sdk.NewsItem{Title: "通知", URL: "https://news.swjtu.edu.cn/info/1/9.htm", Date: "2026-09-01"}
+	first := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	id, err := store.UpsertArticle(ArticleInput{Feed: feed, Item: item, FetchedAt: first, Article: &sdk.Article{Title: "通知", Content: "初稿", ContentHTML: "<p>初稿</p>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resourceURL := range []string{"https://news.swjtu.edu.cn/a.pdf", "https://news.swjtu.edu.cn/b.pdf"} {
+		if _, err := store.UpsertResource(ResourceInput{ArticleID: id, Kind: "attachment", OriginalURL: resourceURL, Status: "success", UpdatedAt: first}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := store.FetchState(item.URL)
+	if err != nil || !state.Exists || state.Refetched || !state.FirstFetchedAt.Equal(first) {
+		t.Fatalf("fresh article state = %+v, %v", state, err)
+	}
+
+	second := first.Add(15 * 24 * time.Hour)
+	_, changed, err := store.SaveRefetch(ArticleInput{Feed: feed, Item: item, FetchedAt: second, Article: &sdk.Article{Title: "通知（更正）", Content: "修订稿", ContentHTML: "<p>修订稿</p>"}},
+		[]string{"https://news.swjtu.edu.cn/b.pdf"})
+	if err != nil || !changed {
+		t.Fatalf("changed re-fetch: changed=%v err=%v", changed, err)
+	}
+	if state, _ := store.FetchState(item.URL); !state.Refetched {
+		t.Fatal("re-fetch was not recorded")
+	}
+	latest, err := store.GetArticle(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Title != "通知（更正）" || latest.Content != "修订稿" || latest.Version != 2 || len(latest.Versions) != 2 {
+		t.Fatalf("latest = %q %q v%d %+v", latest.Title, latest.Content, latest.Version, latest.Versions)
+	}
+	if len(latest.Resources) != 1 || latest.Resources[0].OriginalURL != "https://news.swjtu.edu.cn/b.pdf" {
+		t.Fatalf("latest resources = %+v", latest.Resources)
+	}
+	old, err := store.GetArticleVersion(id, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Title != "通知" || old.Content != "初稿" || old.ContentHTML != "<p>初稿</p>" || old.Version != 1 || len(old.Resources) != 2 {
+		t.Fatalf("version 1 = %q %q %q v%d resources=%d", old.Title, old.Content, old.ContentHTML, old.Version, len(old.Resources))
+	}
+	if _, err := store.GetArticleVersion(id, 3); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing version error = %v", err)
+	}
+}
+
+func TestSaveRefetchUnchangedStoresNoVersion(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	item := sdk.NewsItem{Title: "通知", URL: "https://news.swjtu.edu.cn/info/1/10.htm", Date: "2026-09-01"}
+	id, err := store.UpsertArticle(ArticleInput{Feed: feed, Item: item, FetchedAt: time.Now(), Article: &sdk.Article{Title: "通知", Content: "正文 内容"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := store.SaveRefetch(ArticleInput{Feed: feed, Item: item, FetchedAt: time.Now(), Article: &sdk.Article{Title: "通知", Content: "正文\n  内容"}}, nil)
+	if err != nil || changed {
+		t.Fatalf("whitespace-only re-fetch: changed=%v err=%v", changed, err)
+	}
+	article, err := store.GetArticle(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if article.Version != 0 || len(article.Versions) != 0 {
+		t.Fatalf("unchanged article got versions: %+v", article.Versions)
+	}
+	if state, _ := store.FetchState(item.URL); !state.Refetched {
+		t.Fatal("unchanged re-fetch was not recorded")
+	}
+}
+
+func TestRefetchMigrationMarksLegacyRefreshedArticles(t *testing.T) {
+	path := t.TempDir() + "/archive.db"
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feed := sdk.Feed{ID: "news:jdyw", SiteID: "news", SiteName: "新闻网", Category: "university", Slug: "jdyw", Name: "交大要闻", BaseURL: "https://news.swjtu.edu.cn"}
+	first := time.Date(2026, 8, 1, 8, 0, 0, 123456789, time.UTC)
+	for _, input := range []struct {
+		url  string
+		last time.Time
+	}{
+		{"https://news.swjtu.edu.cn/old.htm", first.Add(30 * 24 * time.Hour)},
+		{"https://news.swjtu.edu.cn/young.htm", first.Add(3 * 24 * time.Hour)},
+	} {
+		item := sdk.NewsItem{Title: "t", URL: input.url}
+		if _, err := store.UpsertArticle(ArticleInput{Feed: feed, Item: item, FetchedAt: first, Article: &sdk.Article{Title: "t", Content: "正文"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec("UPDATE articles SET last_fetched_at=? WHERE canonical_url=?", input.last.Format(time.RFC3339Nano), input.url); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec("ALTER TABLE articles DROP COLUMN refetched_at"); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if state, _ := store.FetchState("https://news.swjtu.edu.cn/old.htm"); !state.Refetched {
+		t.Fatal("article refreshed 30 days after its first fetch should count as re-fetched")
+	}
+	if state, _ := store.FetchState("https://news.swjtu.edu.cn/young.htm"); state.Refetched {
+		t.Fatal("article only 3 days into its life must still get its re-fetch")
 	}
 }
