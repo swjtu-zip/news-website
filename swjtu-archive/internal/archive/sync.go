@@ -249,6 +249,8 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 			collector.add(message)
 		}
 		notifyCard(s.opts.Logger, buildSyncSummaryCard(result, started, time.Now(), collector.snapshot()))
+	} else {
+		notifyCard(s.opts.Logger, buildSyncSuccessCard(result, started, time.Now()))
 	}
 	severeMu.Lock()
 	severe := severeErr

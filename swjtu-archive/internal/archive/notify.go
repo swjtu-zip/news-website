@@ -270,3 +270,25 @@ func truncateBytes(s string, max int) string {
 	}
 	return s[:max] + "…"
 }
+
+// buildSyncSuccessCard renders a compact green card for a clean run.
+func buildSyncSuccessCard(result SyncResult, started, finished time.Time) map[string]any {
+	return map[string]any{
+		"header": map[string]any{
+			"title":    plainText("✅ 新闻同步成功"),
+			"subtitle": plainText(fmt.Sprintf("run=%d · %s", result.RunID, formatBeijing(finished))),
+			"template": "green",
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "div",
+				"fields": []any{
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**Feeds**\n%d", result.Feeds))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**新增文章**\n%d", result.Articles))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**资源**\n%d", result.Resources))},
+					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**耗时**\n%s", finished.Sub(started).Round(time.Second).String()))},
+				},
+			},
+		},
+	}
+}
