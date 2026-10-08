@@ -161,19 +161,8 @@ func plainText(content string) map[string]any {
 // full per-error samples inside a collapsed panel.
 func buildSyncSummaryCard(result SyncResult, started, finished time.Time, entries []*errorEntry) map[string]any {
 	duration := finished.Sub(started).Round(time.Second).String()
-
-	var topLines strings.Builder
-	for i, entry := range entries {
-		if i >= summaryTopErrors {
-			fmt.Fprintf(&topLines, "…另有 %d 类错误\n", len(entries)-i)
-			break
-		}
-		fmt.Fprintf(&topLines, "• ×%d %s\n", entry.count, entry.key)
-	}
-	topText := strings.TrimSpace(topLines.String())
-	if topText == "" {
-		topText = "无"
-	}
+	statsLine := fmt.Sprintf("Feeds **%d** · 新增 **%d** · 资源 **%d** · 失败 **%d** · 耗时 **%s**",
+		result.Feeds, result.Articles, result.Resources, result.Failures, duration)
 
 	var detailLines strings.Builder
 	for i, entry := range entries {
@@ -196,24 +185,13 @@ func buildSyncSummaryCard(result SyncResult, started, finished time.Time, entrie
 		},
 		"elements": []any{
 			map[string]any{
-				"tag": "div",
-				"fields": []any{
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**Feeds**\n%d", result.Feeds))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**新增文章**\n%d", result.Articles))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**资源**\n%d", result.Resources))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**失败**\n%d", result.Failures))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**耗时**\n%s", duration))},
-				},
-			},
-			map[string]any{"tag": "hr"},
-			map[string]any{
 				"tag":  "div",
-				"text": mdText("**Top 错误类型**\n" + topText),
+				"text": mdText(statsLine),
 			},
 			map[string]any{
 				"tag":      "collapsible_panel",
 				"expanded": false,
-				"header":   map[string]any{"title": plainText("📋 展开查看完整错误详情")},
+				"header":   map[string]any{"title": plainText(fmt.Sprintf("📋 错误详情（%d 类 · %d 条）", len(entries), result.Failures))},
 				"elements": []any{
 					map[string]any{
 						"tag":  "div",
@@ -227,6 +205,8 @@ func buildSyncSummaryCard(result SyncResult, started, finished time.Time, entrie
 
 // buildSevereAlertCard renders the run-aborting alert as an urgent card.
 func buildSevereAlertCard(runID int64, cause string, result SyncResult, started, now time.Time) map[string]any {
+	statsLine := fmt.Sprintf("Feeds **%d** · 文章 **%d** · 失败 **%d** · 已耗时 **%s**",
+		result.Feeds, result.Articles, result.Failures, now.Sub(started).Round(time.Second).String())
 	return map[string]any{
 		"header": map[string]any{
 			"title":    plainText("🚨 同步严重告警：任务已中断"),
@@ -236,17 +216,7 @@ func buildSevereAlertCard(runID int64, cause string, result SyncResult, started,
 		"elements": []any{
 			map[string]any{
 				"tag":  "div",
-				"text": mdText(fmt.Sprintf("**原因**\n%s", truncateBytes(cause, 500))),
-			},
-			map[string]any{"tag": "hr"},
-			map[string]any{
-				"tag": "div",
-				"fields": []any{
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**Feeds**\n%d", result.Feeds))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**文章**\n%d", result.Articles))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**失败**\n%d", result.Failures))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**已耗时**\n%s", now.Sub(started).Round(time.Second).String()))},
-				},
+				"text": mdText(statsLine + "\n**原因**\n" + truncateBytes(cause, 500)),
 			},
 		},
 	}
@@ -273,6 +243,8 @@ func truncateBytes(s string, max int) string {
 
 // buildSyncSuccessCard renders a compact green card for a clean run.
 func buildSyncSuccessCard(result SyncResult, started, finished time.Time) map[string]any {
+	statsLine := fmt.Sprintf("Feeds **%d** · 新增 **%d** · 资源 **%d** · 耗时 **%s**",
+		result.Feeds, result.Articles, result.Resources, finished.Sub(started).Round(time.Second).String())
 	return map[string]any{
 		"header": map[string]any{
 			"title":    plainText("✅ 新闻同步成功"),
@@ -281,13 +253,8 @@ func buildSyncSuccessCard(result SyncResult, started, finished time.Time) map[st
 		},
 		"elements": []any{
 			map[string]any{
-				"tag": "div",
-				"fields": []any{
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**Feeds**\n%d", result.Feeds))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**新增文章**\n%d", result.Articles))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**资源**\n%d", result.Resources))},
-					map[string]any{"is_short": true, "text": mdText(fmt.Sprintf("**耗时**\n%s", finished.Sub(started).Round(time.Second).String()))},
-				},
+				"tag":  "div",
+				"text": mdText(statsLine),
 			},
 		},
 	}
