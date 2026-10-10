@@ -3,6 +3,7 @@ package archive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -736,5 +737,106 @@ func TestRefetchMigrationMarksLegacyRefreshedArticles(t *testing.T) {
 	}
 	if state, _ := store.FetchState("https://news.swjtu.edu.cn/young.htm"); state.Refetched {
 		t.Fatal("article only 3 days into its life must still get its re-fetch")
+	}
+}
+
+func TestRunErrorsRoundTripAndPrune(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	oldRun, err := store.StartRun(time.Now().Add(-40 * 24 * time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRunErrors(oldRun, []RunError{
+		{FeedID: "news:jdyw", Message: "列表 news:jdyw: old failure"},
+	}, time.Now().Add(-40*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(oldRun, "partial", 1, 0, 0, 1, fmt.Errorf("old run"), time.Now().Add(-40*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := store.StartRun(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := []RunError{
+		{FeedID: "clxy:jwgg", Message: "列表 clxy:jwgg: 3 list row(s) point outside the site"},
+		{FeedID: "clxy:jwgg", Message: "抓取 https://clxy.swjtu.edu.cn/info/1/2.htm: status 404"},
+		{FeedID: "news:jdyw", Message: "跳过空页面 https://news.swjtu.edu.cn/info/1/1.htm: 无正文、图片或附件"},
+	}
+	if err := store.AddRunErrors(runID, errs, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.RunErrors(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != len(errs) {
+		t.Fatalf("stored run errors = %d, want %d", len(stored), len(errs))
+	}
+	for i, want := range errs {
+		if stored[i] != want {
+			t.Fatalf("run error %d = %#v, want %#v", i, stored[i], want)
+		}
+	}
+	if err := store.AddRunErrors(runID, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.PruneRunErrors(30*24*time.Hour, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if old, _ := store.RunErrors(oldRun); len(old) != 0 {
+		t.Fatalf("errors of a 40-day-old run survived a 30-day prune: %#v", old)
+	}
+	if recent, _ := store.RunErrors(runID); len(recent) != len(errs) {
+		t.Fatalf("errors of the current run must survive pruning, got %d", len(recent))
+	}
+}
+
+func TestFeedListStatePersistsAcrossReopen(t *testing.T) {
+	path := t.TempDir() + "/archive.db"
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	if err := store.MarkFeedFullListed("news:jdyw", marked); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkFeedFullListed("clxy:jwgg", marked.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	states, err := store.LoadFeedListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states["news:jdyw"].Equal(marked) {
+		t.Fatalf("loaded state = %v, want %v", states["news:jdyw"], marked)
+	}
+	store.Close()
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	states, err = reopened.LoadFeedListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states["news:jdyw"].Equal(marked) || !states["clxy:jwgg"].Equal(marked.Add(-time.Hour)) {
+		t.Fatalf("states did not survive reopen: %#v", states)
+	}
+	if err := reopened.MarkFeedFullListed("news:jdyw", marked.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if states, _ := reopened.LoadFeedListStates(); !states["news:jdyw"].Equal(marked.Add(2 * time.Hour)) {
+		t.Fatalf("upsert did not overwrite: %#v", states["news:jdyw"])
 	}
 }

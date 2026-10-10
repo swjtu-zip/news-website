@@ -122,6 +122,27 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     failures INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT ''
 );
+
+-- sync_run_errors keeps every failure message of a run with its feed, so a
+-- failure burst can be triaged from the database days later instead of only
+-- living in the one Feishu card of the hour.
+CREATE TABLE IF NOT EXISTS sync_run_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+    feed_id TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sync_run_errors_run_idx ON sync_run_errors(run_id);
+
+-- feed_list_state persists the last full-backfill listing per feed. The
+-- in-memory copy alone resets on every container restart and made the first
+-- sync afterwards re-walk a year of list pages for every feed at once.
+CREATE TABLE IF NOT EXISTS feed_list_state (
+    feed_id TEXT PRIMARY KEY,
+    last_full_list_at TEXT NOT NULL
+);
 `
 
 // Store combines SQLite metadata with the content-addressed archive tree.
@@ -1420,6 +1441,109 @@ func (s *Store) releaseRunLock() {
 	_ = syscall.Flock(int(s.runLock.Fd()), syscall.LOCK_UN)
 	_ = s.runLock.Close()
 	s.runLock = nil
+}
+
+// AddRunErrors persists the failure messages of one sync run. Run errors
+// otherwise exist only in the Feishu card of the hour, which made bursts
+// like a post-restart full backfill impossible to triage afterwards.
+func (s *Store) AddRunErrors(runID int64, errs []RunError, now time.Time) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return retrySQLiteBusy(func() error {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		stmt, err := tx.Prepare(`INSERT INTO sync_run_errors (run_id, feed_id, message, created_at) VALUES (?, ?, ?, ?)`)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		for _, item := range errs {
+			if _, err := stmt.Exec(runID, item.FeedID, item.Message, now.UTC().Format(time.RFC3339Nano)); err != nil {
+				_ = stmt.Close()
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if err := stmt.Close(); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+// RunErrors returns the stored failure messages of one run, oldest first.
+func (s *Store) RunErrors(runID int64) ([]RunError, error) {
+	var errs []RunError
+	err := retrySQLiteBusy(func() error {
+		rows, err := s.db.Query(`SELECT feed_id, message FROM sync_run_errors WHERE run_id = ? ORDER BY id`, runID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item RunError
+			if err := rows.Scan(&item.FeedID, &item.Message); err != nil {
+				return err
+			}
+			errs = append(errs, item)
+		}
+		return rows.Err()
+	})
+	return errs, err
+}
+
+// PruneRunErrors drops error rows that belong to runs finished longer ago
+// than retention, so the table stays bounded without touching recent runs.
+func (s *Store) PruneRunErrors(retention time.Duration, now time.Time) error {
+	cutoff := now.Add(-retention).UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`DELETE FROM sync_run_errors WHERE run_id IN (
+SELECT id FROM sync_runs WHERE finished_at <> '' AND finished_at < ?)`, cutoff)
+	return err
+}
+
+// LoadFeedListStates returns the persisted last-full-list timestamp per feed.
+func (s *Store) LoadFeedListStates() (map[string]time.Time, error) {
+	states := make(map[string]time.Time)
+	err := retrySQLiteBusy(func() error {
+		rows, err := s.db.Query(`SELECT feed_id, last_full_list_at FROM feed_list_state`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var feedID, value string
+			if err := rows.Scan(&feedID, &value); err != nil {
+				return err
+			}
+			parsed, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				continue
+			}
+			states[feedID] = parsed
+		}
+		return rows.Err()
+	})
+	return states, err
+}
+
+// MarkFeedFullListed persists that feedID completed a full backfill listing
+// at t. Restarting the container no longer makes the next sync re-walk a
+// year of list pages for every feed at once.
+func (s *Store) MarkFeedFullListed(feedID string, t time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO feed_list_state (feed_id, last_full_list_at) VALUES (?, ?)
+ON CONFLICT(feed_id) DO UPDATE SET last_full_list_at=excluded.last_full_list_at`,
+		feedID, t.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// RunError is one persisted failure message of a sync run.
+type RunError struct {
+	FeedID  string
+	Message string
 }
 
 func (s *Store) LatestRun() (*RunRecord, error) {

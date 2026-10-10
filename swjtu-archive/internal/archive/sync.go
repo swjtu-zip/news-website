@@ -106,10 +106,22 @@ func NewSyncer(store *Store, client *sdk.Client, opts SyncOptions) *Syncer {
 	if opts.MaxResourceBytes <= 0 {
 		opts.MaxResourceBytes = 256 << 20
 	}
-	return &Syncer{
+	syncer := &Syncer{
 		store: store, client: client, opts: opts,
 		locks: make(map[string]*sync.Mutex), gates: make(map[string]*hostGate), fullListed: make(map[string]time.Time),
 	}
+	// Seeding the full-list schedule from the database keeps a container
+	// restart from turning the next sync into a whole-archive backfill.
+	if store != nil {
+		if states, err := store.LoadFeedListStates(); err != nil {
+			if opts.Logger != nil {
+				opts.Logger.Printf("load feed list state: %v (starting with an empty schedule)", err)
+			}
+		} else {
+			syncer.fullListed = states
+		}
+	}
+	return syncer
 }
 
 // Store returns the backing archive store for the read-only HTTP layer.
@@ -125,6 +137,11 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 	runID, err := s.store.StartRun(started)
 	if err != nil {
 		return SyncResult{}, err
+	}
+	// Bounded retention for the per-run error log; a failed prune must not
+	// stop the sync itself.
+	if err := s.store.PruneRunErrors(30*24*time.Hour, started); err != nil && s.opts.Logger != nil {
+		s.opts.Logger.Printf("prune old sync run errors: %v", err)
 	}
 	collector := newSyncErrorCollector()
 	// runCtx carries the abort triggered by a severe error; without one it
@@ -144,11 +161,16 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 	}
 
 	result := SyncResult{RunID: runID}
+	var runErrs []RunError
+	var runErrsMu sync.Mutex
 	feeds := sdk.Feeds()
 	for _, feed := range feeds {
 		if err := s.store.UpsertFeed(feed, started); err != nil {
 			result.Failures++
 			result.Errors = append(result.Errors, fmt.Sprintf("保存 feed %s: %v", feed.ID, err))
+			runErrsMu.Lock()
+			runErrs = append(runErrs, RunError{FeedID: feed.ID, Message: fmt.Sprintf("保存 feed: %v", err)})
+			runErrsMu.Unlock()
 			if severeSyncError(err.Error()) && claimSevere(err) {
 				notifyCard(s.opts.Logger, buildSevereAlertCard(runID, err.Error(), result, started, time.Now()))
 				cancelRun()
@@ -188,6 +210,16 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 					}
 				}
 				resultMu.Unlock()
+				if len(feedResult.Errors) > 0 || feedErr != nil {
+					runErrsMu.Lock()
+					if feedErr != nil {
+						runErrs = append(runErrs, RunError{FeedID: feed.ID, Message: feedErr.Error()})
+					}
+					for _, message := range feedResult.Errors {
+						runErrs = append(runErrs, RunError{FeedID: feed.ID, Message: message})
+					}
+					runErrsMu.Unlock()
+				}
 				if severe != "" && claimSevere(errors.New(severe)) {
 					// Bad credentials fail every remaining feed too; stop
 					// the run and alert now instead of letting the whole
@@ -210,6 +242,13 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 	}
 	close(jobs)
 	wg.Wait()
+
+	// Persist the per-feed failure messages before the run row is finalized
+	// so a burst can be analyzed from the database long after its card faded.
+	// A persistence failure must not turn a finished sync into a failed one.
+	if err := s.store.AddRunErrors(runID, runErrs, time.Now()); err != nil && s.opts.Logger != nil {
+		s.opts.Logger.Printf("persist sync run errors for run=%d: %v", runID, err)
+	}
 
 	status := "success"
 	var runErr error
@@ -606,8 +645,16 @@ func (s *Syncer) fullListDue(feedID string, now time.Time) bool {
 
 func (s *Syncer) markFullListed(feedID string, now time.Time) {
 	s.lockMu.Lock()
-	defer s.lockMu.Unlock()
 	s.fullListed[feedID] = now
+	s.lockMu.Unlock()
+	// The write is best-effort: the in-memory mark above already prevents an
+	// immediate re-list inside this process, and a failed upsert must not
+	// fail the feed that just completed its full walk.
+	if s.store != nil {
+		if err := s.store.MarkFeedFullListed(feedID, now); err != nil && s.opts.Logger != nil {
+			s.opts.Logger.Printf("persist full-list state for %s: %v", feedID, err)
+		}
+	}
 }
 
 func resourceStorageClass(kind, publishedAt string, now time.Time) string {

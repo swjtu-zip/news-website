@@ -304,3 +304,32 @@ func TestArticleResourceURLsMatchesArchivedRows(t *testing.T) {
 		t.Fatalf("articleResourceURLs = %v", got)
 	}
 }
+
+func TestFullListingScheduleSurvivesSyncerRestart(t *testing.T) {
+	store, err := Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	first := NewSyncer(store, nil, SyncOptions{FullListEvery: 24 * time.Hour})
+	if !first.fullListDue("news:jdyw", now) {
+		t.Fatal("first listing of a feed must be full")
+	}
+	first.markFullListed("news:jdyw", now)
+
+	// A new Syncer against the same store stands in for the container
+	// restart that used to reset the schedule and force a whole-archive
+	// backfill on the next sync.
+	restarted := NewSyncer(store, nil, SyncOptions{FullListEvery: 24 * time.Hour})
+	if restarted.fullListDue("news:jdyw", now.Add(time.Hour)) {
+		t.Fatal("restart must not make a freshly full-listed feed walk the backfill again")
+	}
+	if !restarted.fullListDue("news:jdyw", now.Add(25*time.Hour)) {
+		t.Fatal("full listing must still recur after FullListEvery")
+	}
+	if !restarted.fullListDue("news:mtjd", now.Add(time.Hour)) {
+		t.Fatal("feeds never full-listed stay due regardless of restart")
+	}
+}
