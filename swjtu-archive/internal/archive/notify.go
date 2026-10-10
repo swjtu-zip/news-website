@@ -38,7 +38,7 @@ const (
 	summaryMaxBytes = 3500
 )
 
-const overflowErrorKey = "其他错误"
+const overflowErrorKey = "其他错误（明细已持久化到 sync_run_errors 表，可按 run_id 查询）"
 
 var errorURLPattern = regexp.MustCompile(`https?://\S+`)
 
